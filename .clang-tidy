@@ -1,0 +1,10 @@
+Checks: >
+  -*,
+  clang-analyzer-*,
+  readability-*,
+  cppcoreguidelines-*,
+  security-*,
+  misc-*,
+  -misc-unused-parameters,
+  bugprone-*,
+# WarningsAsErrors: '*'

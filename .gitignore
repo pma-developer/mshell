@@ -1,0 +1,7 @@
+/.idea
+/.cache
+compile_commands.json
+/build
+*.plist
+/temp
+asan.log*
