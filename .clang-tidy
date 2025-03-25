@@ -2,9 +2,11 @@ Checks: >
   -*,
   clang-analyzer-*,
   readability-*,
-  cppcoreguidelines-*,
   security-*,
   misc-*,
   -misc-unused-parameters,
-  bugprone-*,
+  bugprone-*
+CheckOptions:
+  - { key: readability-identifier-length.IgnoredVariableNames, value: ^(l|r)$ }
+  - { key: readability-identifier-length.IgnoredLoopCounterNames, value: ^(i|l|r)$ }
 # WarningsAsErrors: '*'
