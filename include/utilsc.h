@@ -4,12 +4,12 @@ extern "C" {
 #endif
 
 #include <assert.h>
+#include <errno.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <time.h>
-#include <errno.h>
 static const char digits[] =
     "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ@!#$%^&*()-_=+[]{}|;:'\",.<>?/`~";
 
@@ -26,7 +26,6 @@ static const char digits[] =
 bool intToStr(char *buf, int n, int base);
 void reverseStr(char *cstr, size_t strLength);
 size_t removeChar(char toRemove, char *cstr, size_t strLength);
-
 
 inline bool intToStr(char *buf, int n, int base) {
     const size_t maxValidBase = LENGTH(digits);
@@ -64,11 +63,10 @@ inline size_t removeChar(char toRemove, char *cstr, size_t strLength) {
     size_t removed = 0;
 
     for (size_t l = 0, r = 0; r < strLength; r++) {
-        if(cstr[r] != toRemove) {
+        if (cstr[r] != toRemove) {
             cstr[l] = cstr[r];
             l++;
-        }
-        else {
+        } else {
             removed++;
         }
     }
@@ -85,20 +83,21 @@ typedef struct {
 
 #define daResize(da, new_count)                                                                                        \
     do {                                                                                                               \
-                                                                                                                       \
-        size_t new_capacity = (da)->capacity;                                                                          \
-        if ((da)->capacity == 0) {                                                                                     \
-            new_capacity = da_init_capacity;                                                                           \
+        if ((new_count) > (da)->capacity) {                                                                            \
+            size_t new_capacity = (da)->capacity;                                                                      \
+            if ((da)->capacity == 0) {                                                                                 \
+                new_capacity = da_init_capacity;                                                                       \
+            }                                                                                                          \
+            while (new_capacity < (new_count)) {                                                                       \
+                new_capacity *= 2;                                                                                     \
+            }                                                                                                          \
+            void *new_items = realloc((void *)(da)->items, new_capacity * sizeof((void *)*(da)->items));               \
+            if (new_items == NULL) {                                                                                   \
+                assert(new_items != NULL && "Error during DA realloc");                                                \
+            }                                                                                                          \
+            (da)->capacity = new_capacity;                                                                             \
+            (da)->items = (typeof((da)->items))new_items;                                                              \
         }                                                                                                              \
-        while (new_capacity < (new_count)) {                                                                           \
-            new_capacity *= 2;                                                                                         \
-        }                                                                                                              \
-        void *new_items = realloc((void *)(da)->items, new_capacity * sizeof((void *)*(da)->items));                   \
-        if (new_items == NULL) {                                                                                       \
-            assert(new_items != NULL && "Error during DA realloc");                                                    \
-        }                                                                                                              \
-        (da)->capacity = new_capacity;                                                                                 \
-        (da)->items = (typeof((da)->items))new_items;                                                                  \
         (da)->count = new_count;                                                                                       \
     } while (false);
 
@@ -108,9 +107,22 @@ typedef struct {
         (da)->items[(da)->count - 1] = (item);                                                                         \
     } while (false);
 
+
+#define daRemoveAt(da, index)                                                                                          \
+    do {                                                                                                               \
+        if ((da)->count == 0 || (da)->count <= (index)) {                                                              \
+            fprintf(stderr, "Index %i is out of bounds(da->count=%zu)\n", index, (da)->count);                         \
+            break;                                                                                                     \
+        }                                                                                                              \
+        for (size_t i = index; i < (da)->count - 1; i++) {                                                             \
+            (da)->items[i] = (da)->items[i + 1];                                                                       \
+        }                                                                                                              \
+        daResize((da), (da)->count - 1);                                                                               \
+    } while (false);
+
 #define daFree(da)                                                                                                     \
     do {                                                                                                               \
-        free((void *)(da)->items);                                                                                             \
+        free((void *)(da)->items);                                                                                     \
         (da)->count = 0;                                                                                               \
         (da)->capacity = 0;                                                                                            \
     } while (false)
