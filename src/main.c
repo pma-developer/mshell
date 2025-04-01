@@ -13,15 +13,21 @@
 #include <termios.h>
 #include <unistd.h>
 
+typedef enum ProcStatus {
+    PROC_STATUS_UNDEFINED,
+    PROC_STATUS_TERMINATED,
+    PROC_STATUS_SUSPENDED,
+    PROC_STATUS_RUNNING,
+} ProcStatus;
 
 typedef struct {
     char **items;
     size_t count;
     size_t capacity;
-} StrDa;
+} StrDA;
 
 typedef struct {
-    StrDa *items;
+    StrDA *items;
     size_t count;
     size_t capacity;
 } StrArrayDA;
@@ -31,11 +37,16 @@ struct GlobalState {
 };
 
 typedef struct {
-    bool terminated;
-    bool suspended;
+    ProcStatus status;
     pid_t pgid;
     struct termios termios_conf;
-} WaitRes;
+} Job;
+
+typedef struct {
+    Job *items;
+    size_t count;
+    size_t capacity;
+} JobsDA;
 
 struct GlobalState glb;
 const int MAX_STDIN_READ_ERRORS = 5;
@@ -43,12 +54,10 @@ const int MAX_STDIN_READ_ERRORS = 5;
 void resetTermios() { tcsetattr(STDIN_FILENO, TCSAFLUSH, &glb.prev_termios); }
 
 
-WaitRes waitJob(pid_t pid, const char* procname) {
-    WaitRes res = {.pgid = pid, .suspended = false, .terminated = false};
+ProcStatus waitJob(pid_t pid, const char* procname) {
     int wstatus = 0;
     waitpid(pid, &wstatus, WUNTRACED);
-    res.terminated = WIFEXITED(wstatus) || WIFSIGNALED(wstatus);
-    res.suspended = WIFSTOPPED(wstatus);
+
     if (WIFEXITED(wstatus)) {
         int exit_status = WEXITSTATUS(wstatus);
         printf("%s(%i) exited with status %i\n", procname, pid, exit_status);
@@ -73,22 +82,29 @@ WaitRes waitJob(pid_t pid, const char* procname) {
         printf("%s(%i) continued\n", procname, pid);
     }
 
-    tcgetattr(STDIN_FILENO, &res.termios_conf);
-    return res;
+    bool terminated = WIFEXITED(wstatus) || WIFSIGNALED(wstatus);
+    bool suspended = WIFSTOPPED(wstatus);
+
+    if (!(terminated ^ suspended)) {
+        fprintf(stderr, "%s(%i) exited with undefined status", procname, pid);
+        return PROC_STATUS_UNDEFINED;
+    }
+    return terminated ? PROC_STATUS_TERMINATED : PROC_STATUS_SUSPENDED;
 }
 
-WaitRes contJob(pid_t pgid, const struct termios *proc_termios, const char *procname) {
+ProcStatus continueAndWait(pid_t pgid, const struct termios *proc_termios, const char *procname) {
     tcsetpgrp(STDIN_FILENO, pgid);
     tcsetattr(STDIN_FILENO, TCSAFLUSH, proc_termios);
     if(kill(pgid, SIGCONT) < 0) {
+        fprintf(stderr, "kill(%i, SIGCONT) failed\n", pgid);
         perror("kill(pgid, SIGCONT)");
     }
     return waitJob(pgid, procname);
 }
 
-WaitRes execAsChild(const StrDa *args) {
+Job execAndWait(const StrDA *args) {
     int pid = fork();
-    WaitRes job = {0};
+    Job job = {0};
     if (pid == -1) {
         printf("fork() failed\n");
     } else if (pid == 0) {
@@ -112,14 +128,16 @@ WaitRes execAsChild(const StrDa *args) {
         }
         exit(0);
     } else {
-        job = waitJob(pid, args->items[0]);
+        job.pgid = pid;
+        job.status = waitJob(pid, args->items[0]);
+        tcgetattr(STDIN_FILENO, &job.termios_conf);
     }
     return job;
 }
 
-WaitRes pipeCommands(const StrArrayDA *commandsDa) {
+Job pipeCommands(const StrArrayDA *commandsDa) {
     int pid = fork();
-    WaitRes job = {0};
+    Job job = {0};
 
     int pipefds[2];
     pipe(pipefds);
@@ -166,22 +184,22 @@ WaitRes pipeCommands(const StrArrayDA *commandsDa) {
         waitJob(pid, "job2");
 
     } else {
-        job = waitJob(pid, commandsDa->items[0].items[0]);
+        job.pgid = pid;
+        job.status = waitJob(pid, commandsDa->items[0].items[0]);
+        tcgetattr(STDIN_FILENO, &job.termios_conf);
     }
     return job;
 }
 
-void signal_handler(int signum) { printf("Received signal: %d\n", signum); }
-
 int main(int argc, char *argv[]) {
     const size_t max_line_len = 1024;
-    struct termios raw_termios;
+    struct termios shell_termios;
 
     tcgetattr(STDIN_FILENO, &glb.prev_termios);
     atexit(resetTermios);
 
-    raw_termios = glb.prev_termios;
-    raw_termios.c_lflag &= ~(ISIG | TOSTOP);
+    shell_termios = glb.prev_termios;
+    shell_termios.c_lflag &= ~(ISIG | TOSTOP);
 
     signal(SIGINT, SIG_IGN);
     signal(SIGQUIT, SIG_IGN);
@@ -189,7 +207,7 @@ int main(int argc, char *argv[]) {
     signal(SIGTTIN, SIG_IGN);
     signal(SIGTTOU, SIG_IGN);
     signal(SIGCHLD, SIG_IGN);
-    tcsetattr(STDIN_FILENO, TCSAFLUSH, &raw_termios);
+    tcsetattr(STDIN_FILENO, TCSAFLUSH, &shell_termios);
 
     char line_buf[max_line_len + 1];
     size_t line_len = 0;
@@ -197,8 +215,7 @@ int main(int argc, char *argv[]) {
 
     bool line_ended = false;
 
-    WaitRes bg_job = {0};
-    bool has_bg_job = false;
+    JobsDA bg_jobs = {0};
     printf("mshell v0.0.0 *_*\n\n");
     while (true) {
         size_t read_error_count = 0;
@@ -220,39 +237,39 @@ int main(int argc, char *argv[]) {
             char last_char = line_buf[line_len - 1];
             // printf("last char is %c(%hhi)\n", last_char, last_char);
 
-            if ((unsigned char)last_char == raw_termios.c_cc[VINTR]) {
+            if ((unsigned char)last_char == shell_termios.c_cc[VINTR]) {
                 printf("received VINTR\n");
-            } else if ((unsigned char)last_char == raw_termios.c_cc[VQUIT]) {
+            } else if ((unsigned char)last_char == shell_termios.c_cc[VQUIT]) {
                 printf("received VQUIT\n");
-            } else if ((unsigned char)last_char == raw_termios.c_cc[VERASE]) {
+            } else if ((unsigned char)last_char == shell_termios.c_cc[VERASE]) {
                 printf("received VERASE\n");
-            } else if ((unsigned char)last_char == raw_termios.c_cc[VKILL]) {
+            } else if ((unsigned char)last_char == shell_termios.c_cc[VKILL]) {
                 printf("received VKILL\n");
-            } else if ((unsigned char)last_char == raw_termios.c_cc[VEOF]) {
+            } else if ((unsigned char)last_char == shell_termios.c_cc[VEOF]) {
                 printf("received VEOF\n");
-            } else if ((unsigned char)last_char == raw_termios.c_cc[VTIME]) {
+            } else if ((unsigned char)last_char == shell_termios.c_cc[VTIME]) {
                 printf("received VTIME\n");
-            } else if ((unsigned char)last_char == raw_termios.c_cc[VMIN]) {
+            } else if ((unsigned char)last_char == shell_termios.c_cc[VMIN]) {
                 printf("received VMIN\n");
-            } else if ((unsigned char)last_char == raw_termios.c_cc[VSWTC]) {
+            } else if ((unsigned char)last_char == shell_termios.c_cc[VSWTC]) {
                 printf("received VSWTC\n");
-            } else if ((unsigned char)last_char == raw_termios.c_cc[VSTART]) {
+            } else if ((unsigned char)last_char == shell_termios.c_cc[VSTART]) {
                 printf("received VSTART\n");
-            } else if ((unsigned char)last_char == raw_termios.c_cc[VSTOP]) {
+            } else if ((unsigned char)last_char == shell_termios.c_cc[VSTOP]) {
                 printf("received VSTOP\n");
-            } else if ((unsigned char)last_char == raw_termios.c_cc[VSUSP]) {
+            } else if ((unsigned char)last_char == shell_termios.c_cc[VSUSP]) {
                 printf("received VSUSP\n");
-            } else if ((unsigned char)last_char == raw_termios.c_cc[VEOL]) {
+            } else if ((unsigned char)last_char == shell_termios.c_cc[VEOL]) {
                 printf("received VEOL\n");
-            } else if ((unsigned char)last_char == raw_termios.c_cc[VREPRINT]) {
+            } else if ((unsigned char)last_char == shell_termios.c_cc[VREPRINT]) {
                 printf("received VREPRINT\n");
-            } else if ((unsigned char)last_char == raw_termios.c_cc[VDISCARD]) {
+            } else if ((unsigned char)last_char == shell_termios.c_cc[VDISCARD]) {
                 printf("received VDISCARD\n");
-            } else if ((unsigned char)last_char == raw_termios.c_cc[VWERASE]) {
+            } else if ((unsigned char)last_char == shell_termios.c_cc[VWERASE]) {
                 printf("received VWERASE\n");
-            } else if ((unsigned char)last_char == raw_termios.c_cc[VLNEXT]) {
+            } else if ((unsigned char)last_char == shell_termios.c_cc[VLNEXT]) {
                 printf("received VLNEXT\n");
-            } else if ((unsigned char)last_char == raw_termios.c_cc[VEOL2]) {
+            } else if ((unsigned char)last_char == shell_termios.c_cc[VEOL2]) {
                 printf("received VEOL2\n");
             } else if (last_char == '\n') {
                 printf("hit new line!\n");
@@ -280,21 +297,21 @@ int main(int argc, char *argv[]) {
                     return 0;
                 }
                 if (strncmp(line_buf, "fg", line_len) == 0) {
-                    if(has_bg_job) {
-                        WaitRes job = contJob(bg_job.pgid, &bg_job.termios_conf, "bg_job");
-                        tcsetpgrp(STDIN_FILENO, getpgid(0));
-                        tcsetattr(STDIN_FILENO, TCSAFLUSH, &raw_termios);
+                    if(bg_jobs.count > 0) {
+                        Job last_job = bg_jobs.items[bg_jobs.count - 1];
+                        daRemoveAt(&bg_jobs, bg_jobs.count - 1);
+                        last_job.status = continueAndWait(last_job.pgid, &last_job.termios_conf, "bg_job");
+                        tcgetattr(STDIN_FILENO, &last_job.termios_conf);
 
-                        if (job.suspended) {
-                            bg_job = job;
-                            has_bg_job = true;
-                        }
-                        else {
-                            has_bg_job = false;
+                        tcsetpgrp(STDIN_FILENO, getpgid(0));
+                        tcsetattr(STDIN_FILENO, TCSAFLUSH, &shell_termios);
+
+                        if (last_job.status == PROC_STATUS_SUSPENDED) {
+                            daAppend(&bg_jobs, last_job);
                         }
                     }
                     else {
-                        printf("NO BG JOB LOL\n");
+                        printf("No background jobs\n");
                     }
                     line_len = 0;
                     line_ended = false;
@@ -302,7 +319,7 @@ int main(int argc, char *argv[]) {
                 }
             }
 
-            StrDa args = {0};
+            StrDA args = {0};
             char *token = strtok(line_buf, " ");
             while (token != NULL) {
                 daAppend(&args, token);
@@ -310,18 +327,21 @@ int main(int argc, char *argv[]) {
             }
             daAppend(&args, NULL);
 
-            WaitRes child_job = execAsChild(&args);
-            if (child_job.suspended) {
-                bg_job = child_job;
-                has_bg_job = true;
+            Job child_job = execAndWait(&args);
+            if (child_job.status == PROC_STATUS_SUSPENDED) {
+                daAppend(&bg_jobs, child_job);
             }
+
             tcsetpgrp(STDIN_FILENO, getpgid(0));
-            tcsetattr(STDIN_FILENO, TCSAFLUSH, &raw_termios);
+            tcsetattr(STDIN_FILENO, TCSAFLUSH, &shell_termios);
+
             daFree(&args);
             line_len = 0;
             line_ended = false;
         }
     }
+
+    daFree(&bg_jobs);
 
     return 0;
 }

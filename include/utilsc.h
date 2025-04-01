@@ -91,7 +91,7 @@ typedef struct {
             while (new_capacity < (new_count)) {                                                                       \
                 new_capacity *= 2;                                                                                     \
             }                                                                                                          \
-            void *new_items = realloc((void *)(da)->items, new_capacity * sizeof((void *)*(da)->items));               \
+            void *new_items = realloc((void *)(da)->items, new_capacity * sizeof(*(da)->items));                       \
             if (new_items == NULL) {                                                                                   \
                 assert(new_items != NULL && "Error during DA realloc");                                                \
             }                                                                                                          \
@@ -110,8 +110,8 @@ typedef struct {
 
 #define daRemoveAt(da, index)                                                                                          \
     do {                                                                                                               \
-        if ((da)->count == 0 || (da)->count <= (index)) {                                                              \
-            fprintf(stderr, "Index %i is out of bounds(da->count=%zu)\n", index, (da)->count);                         \
+        if ((da)->count <= 0 || (da)->count <= (index)) {                                                              \
+            fprintf(stderr, "Index %zu is out of bounds(da->count=%zu)\n", index, (da)->count);                         \
             break;                                                                                                     \
         }                                                                                                              \
         for (size_t i = index; i < (da)->count - 1; i++) {                                                             \
