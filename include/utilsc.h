@@ -107,11 +107,10 @@ typedef struct {
         (da)->items[(da)->count - 1] = (item);                                                                         \
     } while (false);
 
-
 #define daRemoveAt(da, index)                                                                                          \
     do {                                                                                                               \
         if ((da)->count <= 0 || (da)->count <= (index)) {                                                              \
-            fprintf(stderr, "Index %zu is out of bounds(da->count=%zu)\n", index, (da)->count);                         \
+            fprintf(stderr, "Index %zu is out of bounds(da->count=%zu)\n", index, (da)->count);                        \
             break;                                                                                                     \
         }                                                                                                              \
         for (size_t i = index; i < (da)->count - 1; i++) {                                                             \
@@ -122,9 +121,11 @@ typedef struct {
 
 #define daFree(da)                                                                                                     \
     do {                                                                                                               \
-        free((void *)(da)->items);                                                                                     \
-        (da)->count = 0;                                                                                               \
-        (da)->capacity = 0;                                                                                            \
+        if ((da)->capacity > 0) {                                                                                      \
+            free((void *)(da)->items);                                                                                 \
+            (da)->count = 0;                                                                                           \
+            (da)->capacity = 0;                                                                                        \
+        }                                                                                                              \
     } while (false)
 
 #ifdef __cplusplus
