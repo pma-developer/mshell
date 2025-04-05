@@ -2,6 +2,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
+#include <pwd.h>
 #include <signal.h>
 #include <stdbool.h>
 #include <stddef.h>
@@ -12,12 +13,16 @@
 #include <sys/wait.h>
 #include <termios.h>
 #include <unistd.h>
-#include <pwd.h>
 
 typedef enum PipeFdType {
     PIPE_READ = 0,
     PIPE_WRITE = 1,
 } PipeFdType;
+
+typedef enum PipeModeFlags {
+    PIPE_MODE_READ_TO_STDIN = 1 << 1,
+    PIPE_MODE_STDOUT_TO_WRITE = 1 << 2,
+} PipeModeFlags;
 
 typedef enum ProcStatus {
     PROC_STATUS_UNDEFINED,
@@ -33,6 +38,12 @@ typedef struct {
 } StrDA;
 
 typedef struct {
+    pid_t pid;
+    const char *name;
+    ProcStatus status;
+} Process;
+
+typedef struct {
     StrDA *items;
     size_t count;
     size_t capacity;
@@ -43,15 +54,14 @@ struct GlobalState {
 };
 
 typedef struct {
-    pid_t *items;
+    Process *items;
     size_t count;
     size_t capacity;
-} PidDA;
+} ProcessDA;
 
 typedef struct {
-    ProcStatus status;
+    ProcessDA pipeline;
     pid_t pgid;
-    PidDA pids;
     struct termios termios_conf;
 } Job;
 
@@ -68,10 +78,7 @@ const int MAX_STDIN_READ_ERRORS = 5;
 
 void resetTermios() { tcsetattr(STDIN_FILENO, TCSAFLUSH, &glb.prev_termios); }
 
-ProcStatus waitProc(pid_t pid, const char *procname) {
-    int wstatus = 0;
-    waitpid(pid, &wstatus, WUNTRACED);
-
+void printWStatusDesc(int wstatus, const char *procname, pid_t pid) {
     if (WIFEXITED(wstatus)) {
         int exit_status = WEXITSTATUS(wstatus);
         if (exit_status != 0) {
@@ -97,7 +104,13 @@ ProcStatus waitProc(pid_t pid, const char *procname) {
     if (WIFCONTINUED(wstatus)) {
         printf("%s(%i) continued\n", procname, pid);
     }
+}
 
+ProcStatus waitProc(pid_t pid, const char *procname) {
+    int wstatus = 0;
+    waitpid(pid, &wstatus, WUNTRACED);
+
+    printWStatusDesc(wstatus, procname, pid);
     bool terminated = WIFEXITED(wstatus) || WIFSIGNALED(wstatus);
     bool suspended = WIFSTOPPED(wstatus);
 
@@ -129,36 +142,78 @@ void ignoreStopSignals(bool ignore) {
     signal(SIGCHLD, handler);
 }
 
-Job execInNewPg(const StrDA *args) {
-    int pid = fork();
-    Job job = {0};
-    if (pid == -1) {
-        printf("fork() failed\n");
-    } else if (pid == 0) {
-        pid = getpid();
-        int set_pgid_res = setpgid(pid, pid);
-        if (set_pgid_res != 0) {
-            printf("failed to setpgid\n");
+ProcStatus getProcStatus(pid_t pid) {
+    int wstatus = 0;
+    pid_t wait_res = waitpid(pid, &wstatus, WNOHANG | WUNTRACED);
+    if (wait_res == -1) {
+        return PROC_STATUS_UNDEFINED;
+        perror("waitpid(WNOHANG | WUNTRACED)");
+    }
+    if (wait_res == 0) {
+        return PROC_STATUS_RUNNING;
+    }
+    if (wait_res > 0) {
+        bool terminated = WIFEXITED(wstatus) || WIFSIGNALED(wstatus);
+        bool suspended = WIFSTOPPED(wstatus);
+
+        if (!(terminated ^ suspended)) {
+            return PROC_STATUS_UNDEFINED;
         }
-        if (tcsetpgrp(STDIN_FILENO, getpgid(pid)) != 0) {
-            printf("failed: tcsetpgrp(STDIN_FILENO, getpgid(pid));\n");
+        return terminated ? PROC_STATUS_TERMINATED : PROC_STATUS_SUSPENDED;
+    }
+    return PROC_STATUS_UNDEFINED;
+}
+
+Process execCommand(const StrDA *command, pid_t pgid, bool foreground, PipeModeFlags pipemode, int pipefds[2]) {
+    int pid = fork();
+    if (pid == -1) {
+        perror("fork()");
+    } else if (pid == 0) {
+        int set_pgid_res = setpgid(pid, pgid);
+        if (set_pgid_res != 0) {
+            perror("setpgid");
+        }
+        if (foreground && tcsetpgrp(STDIN_FILENO, getpgid(pid)) != 0) {
+            perror("tcsetpgrp(STDIN_FILENO, getpgid(pid));");
         }
         ignoreStopSignals(false);
-        int execvp_res = execvp(args->items[0], args->items);
-        if (execvp_res == -1) {
-            printf("error executing: \"%s\"\n", args->items[0]);
+
+        if (pipefds != NULL) {
+            const bool read_to_stdin = pipemode & PIPE_MODE_READ_TO_STDIN;
+            const bool stdout_to_write = pipemode & PIPE_MODE_STDOUT_TO_WRITE;
+
+            if(!read_to_stdin) {
+                close(pipefds[PIPE_READ]);
+            }
+            if(!stdout_to_write) {
+                close(pipefds[PIPE_WRITE]);
+            }
+            if(stdout_to_write) {
+                dup2(pipefds[PIPE_WRITE], STDOUT_FILENO);
+                close(pipefds[PIPE_WRITE]);
+            } else {
+            }
         }
-        exit(EXIT_SUCCESS);
-    } else {
-        job.pgid = pid;
-        job.status = waitProc(pid, args->items[0]);
-        tcgetattr(STDIN_FILENO, &job.termios_conf);
+        int execvp_res = execvp(command->items[0], command->items);
+        if (execvp_res == -1) {
+            perror("execvp:");
+            // printf("error executing: \"%s\"\n", command->items[0]);
+        }
+        exit(EXIT_FAILURE);
     }
-    return job;
+
+    Process process = {0};
+    process.pid = pid;
+    process.name = malloc(sizeof(char) * (strlen(command->items[0]) + 1));
+    strcpy((char *)process.name, command->items[0]);
+    process.status = getProcStatus(pid);
+    if (process.status == PROC_STATUS_UNDEFINED) {
+        fprintf(stderr, "%s(%i) created with undefined status", process.name, pid);
+    }
+    return process;
 }
 
 Job pipeCommands(const StrArrayDA *commandsDa) {
-
     int pipefds[2];
     if (pipe(pipefds)) {
         perror("pipe(pipefds)");
@@ -227,6 +282,34 @@ Job pipeCommands(const StrArrayDA *commandsDa) {
     return pipe_job;
 }
 
+bool anyProcessStatus(const ProcessDA *process_da, ProcStatus status) {
+    for (size_t i = 0; i < process_da->count; ++i) {
+        if (process_da->items[i].status == status) {
+            return true;
+        }
+    }
+    return false;
+}
+
+void printPrompt() {
+    char cwd_cstr[MAX_PROMPT_SUB_STR_SIZE] = {0};
+    if (getcwd(cwd_cstr, LENGTH(cwd_cstr)) == NULL) {
+        perror("getcwd");
+    }
+    char hostname_cstr[MAX_PROMPT_SUB_STR_SIZE] = {0};
+    if (gethostname(hostname_cstr, LENGTH(hostname_cstr)) < 0) {
+        perror("gethostname");
+    }
+    char username_cstr[MAX_PROMPT_SUB_STR_SIZE] = {0};
+    if (getlogin_r(username_cstr, LENGTH(username_cstr)) != 0) {
+        perror("getlogin_r");
+    }
+
+    char prompt_cstr[PROMPT_SIZE] = {0};
+    printf("[%s@%s %s]$ ", username_cstr, hostname_cstr, cwd_cstr);
+    fflush(stdout);
+}
+
 int main(int argc, char *argv[]) {
     const size_t max_line_len = 1024;
     struct termios shell_termios;
@@ -247,26 +330,15 @@ int main(int argc, char *argv[]) {
     bool line_ended = false;
 
     JobsDA bg_jobs = {0};
+    Job fg_job = {0};
     printf("mshell v0.0.0 *_*\n\n");
     while (true) {
 
-        char cwd_cstr[MAX_PROMPT_SUB_STR_SIZE] = {0};
-        if (getcwd(cwd_cstr, LENGTH(cwd_cstr)) == NULL) {
-            perror("getcwd");
-        }
-        char hostname_cstr[MAX_PROMPT_SUB_STR_SIZE] = {0};
-        if(gethostname(hostname_cstr, LENGTH(hostname_cstr)) < 0) {
-            perror("gethostname");
-        }
-        char username_cstr[MAX_PROMPT_SUB_STR_SIZE] = {0};
-        if(getlogin_r(username_cstr, LENGTH(username_cstr)) != 0) {
-            perror("getlogin_r");
+        if (fg_job.pipeline.count != 0 && anyProcessStatus(&fg_job.pipeline, PROC_STATUS_RUNNING)) {
+            continue;
         }
 
-        char prompt_cstr[PROMPT_SIZE] = {0};
-        printf("[%s@%s %s]$ ", username_cstr, hostname_cstr, cwd_cstr);
-        fflush(stdout);
-
+        printPrompt();
         size_t read_error_count = 0;
         while (!line_ended && line_len < max_line_len && (read_count = read(STDIN_FILENO, line_buf + line_len, 1))) {
 
@@ -275,7 +347,7 @@ int main(int argc, char *argv[]) {
                 perror("Error reading STDIN");
                 read_error_count++;
                 if (read_error_count >= MAX_STDIN_READ_ERRORS) {
-                    printf("Too many STDIN read errors\n", errno);
+                    printf("Too many STDIN read errors\n");
                     exit(EXIT_FAILURE);
                 }
                 continue;
@@ -329,14 +401,11 @@ int main(int argc, char *argv[]) {
             line_ended = true;
         }
 
-        
-            
         if (line_ended) {
-            line_buf[line_len] = '\0';
-
             size_t removed = removeChar('\n', line_buf, line_len);
             line_len -= removed;
             line_buf[line_len] = '\0';
+
             if (line_len > 0) {
                 if (strncmp(line_buf, "exit", line_len) == 0) {
                     printf("exiting mshell ;_; T_T\n");
@@ -392,7 +461,7 @@ int main(int argc, char *argv[]) {
                 daAppend(&pipe_sequence, args);
                 pipe_token = strtok_r(NULL, pipe_delim, &pipe_strtok_saveptr);
             }
-            
+
             if (pipe_sequence.count > 0) {
                 if (pipe_sequence.count == 1) {
                     Job child_job = execInNewPg(&pipe_sequence.items[0]);

@@ -59,12 +59,12 @@ inline void reverseStr(char *cstr, size_t strLength) {
         cstr[r] = tmp;
     }
 }
-inline size_t removeChar(char toRemove, char *cstr, size_t strLength) {
+inline size_t removeChar(char toRemove, char *str, size_t strLength) {
     size_t removed = 0;
 
     for (size_t l = 0, r = 0; r < strLength; r++) {
-        if (cstr[r] != toRemove) {
-            cstr[l] = cstr[r];
+        if (str[r] != toRemove) {
+            str[l] = str[r];
             l++;
         } else {
             removed++;
