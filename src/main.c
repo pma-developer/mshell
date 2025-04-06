@@ -20,6 +20,7 @@ typedef enum PipeFdType {
 } PipeFdType;
 
 typedef enum PipeModeFlags {
+    PIPE_MODE_NONE = 0,
     PIPE_MODE_READ_TO_STDIN = 1 << 1,
     PIPE_MODE_STDOUT_TO_WRITE = 1 << 2,
 } PipeModeFlags;
@@ -73,10 +74,15 @@ typedef struct {
 
 struct GlobalState glb;
 const int MAX_STDIN_READ_ERRORS = 5;
+
+static volatile sig_atomic_t sig_chld_unhandled = 0;
+
 #define MAX_PROMPT_SUB_STR_SIZE 128
 #define PROMPT_SIZE ((MAX_PROMPT_SUB_STR_SIZE * 3) + 50)
 
 void resetTermios() { tcsetattr(STDIN_FILENO, TCSAFLUSH, &glb.prev_termios); }
+
+void freeProcessFields(const Process *process) { free((void *)process->name); }
 
 void printWStatusDesc(int wstatus, const char *procname, pid_t pid) {
     if (WIFEXITED(wstatus)) {
@@ -106,10 +112,9 @@ void printWStatusDesc(int wstatus, const char *procname, pid_t pid) {
     }
 }
 
-ProcStatus waitProc(pid_t pid, const char *procname) {
+ProcStatus waitProcBlocking(pid_t pid, const char *procname) {
     int wstatus = 0;
     waitpid(pid, &wstatus, WUNTRACED);
-
     printWStatusDesc(wstatus, procname, pid);
     bool terminated = WIFEXITED(wstatus) || WIFSIGNALED(wstatus);
     bool suspended = WIFSTOPPED(wstatus);
@@ -122,13 +127,7 @@ ProcStatus waitProc(pid_t pid, const char *procname) {
 }
 
 ProcStatus continueAndWait(pid_t pgid, const struct termios *proc_termios, const char *procname) {
-    tcsetpgrp(STDIN_FILENO, pgid);
-    tcsetattr(STDIN_FILENO, TCSAFLUSH, proc_termios);
-    if (kill(pgid, SIGCONT) < 0) {
-        fprintf(stderr, "kill(%i, SIGCONT) failed\n", pgid);
-        perror("kill(pgid, SIGCONT)");
-    }
-    return waitProc(pgid, procname);
+    return waitProcBlocking(pgid, procname);
 }
 
 void ignoreStopSignals(bool ignore) {
@@ -164,7 +163,7 @@ ProcStatus getProcStatus(pid_t pid) {
     return PROC_STATUS_UNDEFINED;
 }
 
-Process execCommand(const StrDA *command, pid_t pgid, bool foreground, PipeModeFlags pipemode, int pipefds[2]) {
+Process execCommand(const StrDA *command, pid_t pgid, bool set_pg_to_fg, PipeModeFlags pipemode, int pipefds[2]) {
     int pid = fork();
     if (pid == -1) {
         perror("fork()");
@@ -173,26 +172,21 @@ Process execCommand(const StrDA *command, pid_t pgid, bool foreground, PipeModeF
         if (set_pgid_res != 0) {
             perror("setpgid");
         }
-        if (foreground && tcsetpgrp(STDIN_FILENO, getpgid(pid)) != 0) {
+        if (set_pg_to_fg && tcsetpgrp(STDIN_FILENO, getpgid(pid)) != 0) {
             perror("tcsetpgrp(STDIN_FILENO, getpgid(pid));");
         }
         ignoreStopSignals(false);
 
         if (pipefds != NULL) {
-            const bool read_to_stdin = pipemode & PIPE_MODE_READ_TO_STDIN;
-            const bool stdout_to_write = pipemode & PIPE_MODE_STDOUT_TO_WRITE;
-
-            if(!read_to_stdin) {
-                close(pipefds[PIPE_READ]);
-            }
-            if(!stdout_to_write) {
-                close(pipefds[PIPE_WRITE]);
-            }
-            if(stdout_to_write) {
+            if (pipemode & PIPE_MODE_STDOUT_TO_WRITE) {
                 dup2(pipefds[PIPE_WRITE], STDOUT_FILENO);
-                close(pipefds[PIPE_WRITE]);
-            } else {
             }
+            close(pipefds[PIPE_WRITE]);
+
+            if (pipemode & PIPE_MODE_READ_TO_STDIN) {
+                dup2(pipefds[PIPE_READ], STDIN_FILENO);
+            }
+            close(pipefds[PIPE_READ]);
         }
         int execvp_res = execvp(command->items[0], command->items);
         if (execvp_res == -1) {
@@ -219,66 +213,18 @@ Job pipeCommands(const StrArrayDA *commandsDa) {
         perror("pipe(pipefds)");
         return (Job){0};
     }
-
     Job pipe_job = {0};
+    Process proc0 = execCommand(&commandsDa->items[0], 0, true, PIPE_MODE_STDOUT_TO_WRITE, pipefds);
+    Process proc1 = execCommand(&commandsDa->items[1], proc0.pid, false, PIPE_MODE_READ_TO_STDIN, pipefds);
 
-    char *job0_name = commandsDa->items[0].items[0];
-    pid_t pid0 = fork();
-    if (pid0 == -1) {
-        perror("fork()");
-        return (Job){0};
-    }
-    if (pid0 == 0) {
-        if (setpgid(pid0, pid0) != 0) {
-            perror("setpgid(pid0, pid0);\n");
-        }
-        if (tcsetpgrp(STDIN_FILENO, getpgid(pid0)) != 0) {
-            printf("failed: tcsetpgrp(STDIN_FILENO, getpgid(pid));\n");
-        }
-        ignoreStopSignals(false);
-
-        close(pipefds[PIPE_READ]);
-        dup2(pipefds[PIPE_WRITE], STDOUT_FILENO);
-        close(pipefds[PIPE_WRITE]);
-        int execvn_res = execvp(job0_name, commandsDa->items[0].items);
-        if (execvn_res == -1) {
-            printf("error executing: \"%s\"\n", commandsDa->items[0].items[0]);
-        }
-        exit(EXIT_FAILURE);
-    }
-
-    char *job1_name = commandsDa->items[1].items[0];
-    pid_t pid1 = fork();
-    if (pid1 == -1) {
-        perror("fork()");
-        return (Job){0};
-    }
-    if (pid1 == 0) {
-        if (setpgid(pid1, pid0) != 0) {
-            perror("setpgid(pid1, pid0);\n");
-        }
-        ignoreStopSignals(false);
-
-        close(pipefds[PIPE_WRITE]);
-        dup2(pipefds[PIPE_READ], STDIN_FILENO);
-        close(pipefds[PIPE_READ]);
-        int execvn_res = execvp(job1_name, commandsDa->items[1].items);
-        if (execvn_res != 0) {
-            printf("error executing: \"%s\"\n", commandsDa->items[1].items[0]);
-        }
-        exit(EXIT_FAILURE);
-    }
+    pipe_job.pgid = proc0.pid;
+    daAppend(&pipe_job.pipeline, proc0);
+    daAppend(&pipe_job.pipeline, proc1);
 
     close(pipefds[PIPE_WRITE]);
     close(pipefds[PIPE_READ]);
-    ProcStatus job0_status = waitProc(pid0, job0_name);
-    ProcStatus job1_status = waitProc(pid1, job1_name);
 
-    pipe_job.status = job0_status == PROC_STATUS_SUSPENDED || job1_status == PROC_STATUS_SUSPENDED
-                          ? PROC_STATUS_SUSPENDED
-                          : PROC_STATUS_TERMINATED;
-    pipe_job.pgid = pid0;
-    tcgetattr(STDIN_FILENO, &pipe_job.termios_conf);
+    // tcgetattr(STDIN_FILENO, &pipe_job.termios_conf);
     return pipe_job;
 }
 
@@ -289,6 +235,52 @@ bool anyProcessStatus(const ProcessDA *process_da, ProcStatus status) {
         }
     }
     return false;
+}
+
+void updateProcStatuses(const ProcessDA *process_da) {
+    for (size_t i = 0; i < process_da->count; ++i) {
+        process_da->items[i].status = getProcStatus(process_da->items[i].pid);
+    }
+}
+
+ProcStatus getPipelineStatus(const ProcessDA *process_da) {
+    bool anyUndefined = false, anyRunning = false, anySuspended = false, anyTerminated = false;
+
+    for (size_t i = 0; i < process_da->count; ++i) {
+        switch (process_da->items[i].status) {
+        case PROC_STATUS_UNDEFINED:
+            anyUndefined = true;
+            break;
+
+        case PROC_STATUS_SUSPENDED:
+            anySuspended = true;
+            break;
+
+        case PROC_STATUS_RUNNING:
+            anyRunning = true;
+            break;
+
+        case PROC_STATUS_TERMINATED:
+            anyTerminated = true;
+            break;
+        }
+    }
+
+    if (anyUndefined) {
+        return PROC_STATUS_UNDEFINED;
+    }
+    if (anyRunning) {
+        return PROC_STATUS_RUNNING;
+    }
+    if (anySuspended) {
+        return PROC_STATUS_SUSPENDED;
+    }
+    if (anyTerminated) {
+        return PROC_STATUS_TERMINATED;
+    }
+
+    fprintf(stderr, "unable to determine pipeline status\n");
+    return PROC_STATUS_UNDEFINED;
 }
 
 void printPrompt() {
@@ -307,7 +299,11 @@ void printPrompt() {
 
     char prompt_cstr[PROMPT_SIZE] = {0};
     printf("[%s@%s %s]$ ", username_cstr, hostname_cstr, cwd_cstr);
-    fflush(stdout);
+}
+
+void sigChldHandler(int signum) {
+    assert(signum == SIGCHLD && "SigChldHandler got other signal\n");
+    sig_chld_unhandled = 1;
 }
 
 int main(int argc, char *argv[]) {
@@ -323,6 +319,12 @@ int main(int argc, char *argv[]) {
     ignoreStopSignals(true);
     tcsetattr(STDIN_FILENO, TCSAFLUSH, &shell_termios);
 
+    struct sigaction sigaction_chld;
+    sigaction_chld.sa_handler = sigChldHandler;
+    sigaction_chld.sa_flags = SA_RESTART;
+
+    sigaction(SIGCHLD, &sigaction_chld, NULL);
+
     char line_buf[max_line_len + 1];
     size_t line_len = 0;
     ssize_t read_count = 0;
@@ -334,11 +336,34 @@ int main(int argc, char *argv[]) {
     printf("mshell v0.0.0 *_*\n\n");
     while (true) {
 
-        if (fg_job.pipeline.count != 0 && anyProcessStatus(&fg_job.pipeline, PROC_STATUS_RUNNING)) {
+        updateProcStatuses(&fg_job.pipeline);
+        for (size_t i = 0; i < bg_jobs.count; ++i) {
+            updateProcStatuses(&bg_jobs.items[i].pipeline);
+        }
+        sig_chld_unhandled = 0;
+
+        ProcStatus fg_status = getPipelineStatus(&fg_job.pipeline);
+        if (fg_status == PROC_STATUS_SUSPENDED || fg_status == PROC_STATUS_TERMINATED) {
+            if (fg_status == PROC_STATUS_SUSPENDED) {
+                tcgetattr(STDIN_FILENO, &fg_job.termios_conf);
+                daAppend(&bg_jobs, fg_job);
+            } else if (fg_status == PROC_STATUS_TERMINATED) {
+                for (size_t i = 0; i < fg_job.pipeline.count; ++i) {
+                    freeProcessFields(&fg_job.pipeline.items[i]);
+                }
+                daResize(&fg_job.pipeline, 0);
+            }
+            /* return control to the shell */
+            tcsetpgrp(STDIN_FILENO, getpgid(0));
+            tcsetattr(STDIN_FILENO, TCSAFLUSH, &shell_termios);
+        }
+
+        if (sig_chld_unhandled == 1 || fg_status == PROC_STATUS_RUNNING) {
             continue;
         }
 
         printPrompt();
+        fflush(stdout);
         size_t read_error_count = 0;
         while (!line_ended && line_len < max_line_len && (read_count = read(STDIN_FILENO, line_buf + line_len, 1))) {
 
@@ -414,17 +439,17 @@ int main(int argc, char *argv[]) {
                 }
                 if (strncmp(line_buf, "fg", line_len) == 0) {
                     if (bg_jobs.count > 0) {
-                        Job last_job = bg_jobs.items[bg_jobs.count - 1];
+                        fg_job = bg_jobs.items[bg_jobs.count - 1];
                         daRemoveAt(&bg_jobs, bg_jobs.count - 1);
-                        last_job.status = continueAndWait(last_job.pgid, &last_job.termios_conf, "bg_job");
-                        tcgetattr(STDIN_FILENO, &last_job.termios_conf);
 
-                        tcsetpgrp(STDIN_FILENO, getpgid(0));
-                        tcsetattr(STDIN_FILENO, TCSAFLUSH, &shell_termios);
+                        tcsetpgrp(STDIN_FILENO, fg_job.pgid);
+                        tcsetattr(STDIN_FILENO, TCSAFLUSH, &fg_job.termios_conf);
 
-                        if (last_job.status == PROC_STATUS_SUSPENDED) {
-                            daAppend(&bg_jobs, last_job);
+                        if (killpg(fg_job.pgid, SIGCONT) < 0) {
+                            fprintf(stderr, "kill(%i, SIGCONT) failed\n", fg_job.pgid);
+                            perror("kill(pgid, SIGCONT)");
                         }
+
                     } else {
                         printf("No background jobs\n");
                     }
@@ -439,7 +464,7 @@ int main(int argc, char *argv[]) {
                 }
             }
 
-            StrArrayDA pipe_sequence = {0};
+            StrArrayDA command_pipe_sequence = {0};
 
             const char pipe_delim[] = "|";
             const char args_delim[] = " ";
@@ -458,36 +483,37 @@ int main(int argc, char *argv[]) {
                 /* Needed for correctness of 'exec()' */
                 daAppend(&args, NULL);
 
-                daAppend(&pipe_sequence, args);
+                daAppend(&command_pipe_sequence, args);
                 pipe_token = strtok_r(NULL, pipe_delim, &pipe_strtok_saveptr);
             }
 
-            if (pipe_sequence.count > 0) {
-                if (pipe_sequence.count == 1) {
-                    Job child_job = execInNewPg(&pipe_sequence.items[0]);
-                    if (child_job.status == PROC_STATUS_SUSPENDED) {
-                        daAppend(&bg_jobs, child_job);
-                    }
+            if (command_pipe_sequence.count > 0) {
+                if (command_pipe_sequence.count == 1) {
+                    Process new_proc = execCommand(&command_pipe_sequence.items[0], 0, true, PIPE_MODE_NONE, NULL);
+
+                    assert(fg_job.pipeline.count == 0 && "trying to add new process to non-empty fg_job.pipeline\n");
+                    daAppend(&fg_job.pipeline, new_proc);
                 } else {
-                    Job pipe_job = pipeCommands(&pipe_sequence);
-                    if (pipe_job.status == PROC_STATUS_SUSPENDED) {
-                        daAppend(&bg_jobs, pipe_job);
-                    }
+                    // TODO: free; dont reuse fg_job.pipeline
+                    Job pipe_job = pipeCommands(&command_pipe_sequence);
+                    assert(fg_job.pipeline.count == 0 &&
+                           "PIPE: trying to add new process to non-empty fg_job.pipeline\n");
+                    // daAppend(&fg_job.pipeline, new_proc);
                 }
 
                 tcsetpgrp(STDIN_FILENO, getpgid(0));
                 tcsetattr(STDIN_FILENO, TCSAFLUSH, &shell_termios);
             }
 
-            for (int i = 0; i < pipe_sequence.count; i++) {
-                daFree(&pipe_sequence.items[i]);
+            for (int i = 0; i < command_pipe_sequence.count; i++) {
+                daFree(&command_pipe_sequence.items[i]);
             }
-            daFree(&pipe_sequence);
+            daFree(&command_pipe_sequence);
             line_len = 0;
             line_ended = false;
         }
     }
-
+    daFree(&fg_job.pipeline);
     daFree(&bg_jobs);
 
     return 0;
