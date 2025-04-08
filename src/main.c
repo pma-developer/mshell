@@ -143,7 +143,7 @@ void ignoreStopSignals(bool ignore) {
 
 ProcStatus getProcStatus(pid_t pid) {
     int wstatus = 0;
-    pid_t wait_res = waitpid(pid, &wstatus, WNOHANG | WUNTRACED);
+    pid_t wait_res = waitpid(pid, &wstatus, WNOHANG | WUNTRACED | WCONTINUED);
     if (wait_res == -1) {
         return PROC_STATUS_UNDEFINED;
         perror("waitpid(WNOHANG | WUNTRACED)");
@@ -154,6 +154,7 @@ ProcStatus getProcStatus(pid_t pid) {
     if (wait_res > 0) {
         bool terminated = WIFEXITED(wstatus) || WIFSIGNALED(wstatus);
         bool suspended = WIFSTOPPED(wstatus);
+        printWStatusDesc(wstatus, "proc", pid);
 
         if (!(terminated ^ suspended)) {
             return PROC_STATUS_UNDEFINED;
@@ -168,16 +169,25 @@ Process execCommand(const StrDA *command, pid_t pgid, bool set_pg_to_fg, PipeMod
     if (pid == -1) {
         perror("fork()");
     } else if (pid == 0) {
-        int set_pgid_res = setpgid(pid, pgid);
-        if (set_pgid_res != 0) {
-            perror("setpgid");
+
+        int setpgid_res = setpgid(pid, pgid);
+        int tcsetpgrp_res = 0;
+        if (set_pg_to_fg) {
+            tcsetpgrp_res = tcsetpgrp(STDIN_FILENO, getpgid(pid));
         }
-        if (set_pg_to_fg && tcsetpgrp(STDIN_FILENO, getpgid(pid)) != 0) {
-            perror("tcsetpgrp(STDIN_FILENO, getpgid(pid));");
-        }
+
+        /* Reseting termios */
+        resetTermios();
         ignoreStopSignals(false);
 
+        if (setpgid_res != 0) {
+            perror("setpgid");
+        }
+        if (tcsetpgrp_res != 0) {
+            perror("tcsetpgrp(STDIN_FILENO, getpgid(pid));");
+        }
         if (pipefds != NULL) {
+            printf("configuring pipe\n");
             if (pipemode & PIPE_MODE_STDOUT_TO_WRITE) {
                 dup2(pipefds[PIPE_WRITE], STDOUT_FILENO);
             }
@@ -203,6 +213,8 @@ Process execCommand(const StrDA *command, pid_t pgid, bool set_pg_to_fg, PipeMod
     process.status = getProcStatus(pid);
     if (process.status == PROC_STATUS_UNDEFINED) {
         fprintf(stderr, "%s(%i) created with undefined status", process.name, pid);
+    } else if (process.status != PROC_STATUS_RUNNING) {
+        fprintf(stderr, "%s(%i) created but not running", process.name, pid);
     }
     return process;
 }
@@ -297,7 +309,6 @@ void printPrompt() {
         perror("getlogin_r");
     }
 
-    char prompt_cstr[PROMPT_SIZE] = {0};
     printf("[%s@%s %s]$ ", username_cstr, hostname_cstr, cwd_cstr);
 }
 
@@ -322,7 +333,6 @@ int main(int argc, char *argv[]) {
     struct sigaction sigaction_chld;
     sigaction_chld.sa_handler = sigChldHandler;
     sigaction_chld.sa_flags = SA_RESTART;
-
     sigaction(SIGCHLD, &sigaction_chld, NULL);
 
     char line_buf[max_line_len + 1];
@@ -351,8 +361,8 @@ int main(int argc, char *argv[]) {
                 for (size_t i = 0; i < fg_job.pipeline.count; ++i) {
                     freeProcessFields(&fg_job.pipeline.items[i]);
                 }
-                daResize(&fg_job.pipeline, 0);
             }
+            daResize(&fg_job.pipeline, 0);
             /* return control to the shell */
             tcsetpgrp(STDIN_FILENO, getpgid(0));
             tcsetattr(STDIN_FILENO, TCSAFLUSH, &shell_termios);
@@ -442,8 +452,13 @@ int main(int argc, char *argv[]) {
                         fg_job = bg_jobs.items[bg_jobs.count - 1];
                         daRemoveAt(&bg_jobs, bg_jobs.count - 1);
 
-                        tcsetpgrp(STDIN_FILENO, fg_job.pgid);
+                        printf("tcsetpgrp %i\n", fg_job.pgid);
+                        int tcsetpgrp_res = tcsetpgrp(STDIN_FILENO, fg_job.pgid);
+                        if (tcsetpgrp_res != 0) {
+                            perror("tcsetpgrp(STDIN_FILENO, getpgid(pid));");
+                        }
                         tcsetattr(STDIN_FILENO, TCSAFLUSH, &fg_job.termios_conf);
+                        printf("pgrp before SIGCONT %i\n", tcgetpgrp(STDIN_FILENO));
 
                         if (killpg(fg_job.pgid, SIGCONT) < 0) {
                             fprintf(stderr, "kill(%i, SIGCONT) failed\n", fg_job.pgid);
@@ -490,8 +505,8 @@ int main(int argc, char *argv[]) {
             if (command_pipe_sequence.count > 0) {
                 if (command_pipe_sequence.count == 1) {
                     Process new_proc = execCommand(&command_pipe_sequence.items[0], 0, true, PIPE_MODE_NONE, NULL);
-
                     assert(fg_job.pipeline.count == 0 && "trying to add new process to non-empty fg_job.pipeline\n");
+                    fg_job.pgid = new_proc.pid;
                     daAppend(&fg_job.pipeline, new_proc);
                 } else {
                     // TODO: free; dont reuse fg_job.pipeline
@@ -500,9 +515,6 @@ int main(int argc, char *argv[]) {
                            "PIPE: trying to add new process to non-empty fg_job.pipeline\n");
                     // daAppend(&fg_job.pipeline, new_proc);
                 }
-
-                tcsetpgrp(STDIN_FILENO, getpgid(0));
-                tcsetattr(STDIN_FILENO, TCSAFLUSH, &shell_termios);
             }
 
             for (int i = 0; i < command_pipe_sequence.count; i++) {
