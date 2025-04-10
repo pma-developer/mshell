@@ -4,11 +4,13 @@
 #include <limits.h>
 #include <pwd.h>
 #include <signal.h>
+#include <stdatomic.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/epoll.h>
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <termios.h>
@@ -77,6 +79,7 @@ const int MAX_STDIN_READ_ERRORS = 5;
 
 static volatile sig_atomic_t sig_chld_unhandled = 0;
 
+#define MAX_EPOLL_EVENTS 10
 #define MAX_PROMPT_SUB_STR_SIZE 128
 #define PROMPT_SIZE ((MAX_PROMPT_SUB_STR_SIZE * 3) + 50)
 
@@ -337,12 +340,24 @@ int main(int argc, char *argv[]) {
 
     char line_buf[max_line_len + 1];
     size_t line_len = 0;
-    ssize_t read_count = 0;
 
     bool line_ended = false;
+    bool prompted_printed = false;
 
     JobsDA bg_jobs = {0};
     Job fg_job = {0};
+
+    struct epoll_event event_buf[MAX_EPOLL_EVENTS];
+    int epoll_fd = epoll_create1(0);
+    if (epoll_fd == -1) {
+        perror("epoll_create1");
+        return 1;
+    }
+    struct epoll_event event;
+    event.data.fd = STDIN_FILENO;
+    event.events = EPOLLIN;
+    epoll_ctl(epoll_fd, EPOLL_CTL_ADD, STDIN_FILENO, &event);
+
     printf("mshell v0.0.0 *_*\n\n");
     while (true) {
 
@@ -352,7 +367,10 @@ int main(int argc, char *argv[]) {
         }
         sig_chld_unhandled = 0;
 
-        ProcStatus fg_status = getPipelineStatus(&fg_job.pipeline);
+        ProcStatus fg_status = PROC_STATUS_UNDEFINED;
+        if (fg_job.pipeline.count > 0) {
+            fg_status = getPipelineStatus(&fg_job.pipeline);
+        }
         if (fg_status == PROC_STATUS_SUSPENDED || fg_status == PROC_STATUS_TERMINATED) {
             if (fg_status == PROC_STATUS_SUSPENDED) {
                 tcgetattr(STDIN_FILENO, &fg_job.termios_conf);
@@ -372,63 +390,78 @@ int main(int argc, char *argv[]) {
             continue;
         }
 
-        printPrompt();
-        fflush(stdout);
-        size_t read_error_count = 0;
-        while (!line_ended && line_len < max_line_len && (read_count = read(STDIN_FILENO, line_buf + line_len, 1))) {
+        if (!prompted_printed) {
+            printPrompt();
+            fflush(stdout);
+            prompted_printed = true;
+        }
 
-            if (read_count < 0) {
-                printf("errno: %d\n", errno);
-                perror("Error reading STDIN");
-                read_error_count++;
-                if (read_error_count >= MAX_STDIN_READ_ERRORS) {
-                    printf("Too many STDIN read errors\n");
-                    exit(EXIT_FAILURE);
+        const int ready_fds = epoll_wait(epoll_fd, event_buf, MAX_EPOLL_EVENTS, 0);
+        if (ready_fds == -1) {
+            perror("epoll wait");
+        }
+
+        for (size_t i = 0; i < ready_fds; ++i) {
+            if (event_buf[i].data.fd == STDIN_FILENO) {
+                size_t read_error_count = 0;
+                ssize_t read_count = 0;
+                while (!line_ended && line_len < max_line_len &&
+                       (read_count = read(STDIN_FILENO, line_buf + line_len, 1))) {
+
+                    if (read_count < 0) {
+                        printf("errno: %d\n", errno);
+                        perror("Error reading STDIN");
+                        read_error_count++;
+                        if (read_error_count >= MAX_STDIN_READ_ERRORS) {
+                            printf("Too many STDIN read errors\n");
+                            exit(EXIT_FAILURE);
+                        }
+                        continue;
+                    }
+                    read_error_count = 0;
+                    line_len += read_count;
+                    // printf("read %zi chars; line_len=%zu\n", read_count, line_len);
+                    char last_char = line_buf[line_len - 1];
+                    // printf("last char is %c(%hhi)\n", last_char, last_char);
+
+                    if ((unsigned char)last_char == shell_termios.c_cc[VINTR]) {
+                        printf("received VINTR\n");
+                    } else if ((unsigned char)last_char == shell_termios.c_cc[VQUIT]) {
+                        printf("received VQUIT\n");
+                    } else if ((unsigned char)last_char == shell_termios.c_cc[VERASE]) {
+                        printf("received VERASE\n");
+                    } else if ((unsigned char)last_char == shell_termios.c_cc[VKILL]) {
+                        printf("received VKILL\n");
+                    } else if ((unsigned char)last_char == shell_termios.c_cc[VEOF]) {
+                        printf("received VEOF\n");
+                    } else if ((unsigned char)last_char == shell_termios.c_cc[VTIME]) {
+                        printf("received VTIME\n");
+                    } else if ((unsigned char)last_char == shell_termios.c_cc[VMIN]) {
+                        printf("received VMIN\n");
+                    } else if ((unsigned char)last_char == shell_termios.c_cc[VSWTC]) {
+                        printf("received VSWTC\n");
+                    } else if ((unsigned char)last_char == shell_termios.c_cc[VSTART]) {
+                        printf("received VSTART\n");
+                    } else if ((unsigned char)last_char == shell_termios.c_cc[VSTOP]) {
+                        printf("received VSTOP\n");
+                    } else if ((unsigned char)last_char == shell_termios.c_cc[VSUSP]) {
+                        printf("received VSUSP\n");
+                    } else if ((unsigned char)last_char == shell_termios.c_cc[VEOL]) {
+                        printf("received VEOL\n");
+                    } else if ((unsigned char)last_char == shell_termios.c_cc[VREPRINT]) {
+                        printf("received VREPRINT\n");
+                    } else if ((unsigned char)last_char == shell_termios.c_cc[VDISCARD]) {
+                        printf("received VDISCARD\n");
+                    } else if ((unsigned char)last_char == shell_termios.c_cc[VWERASE]) {
+                        printf("received VWERASE\n");
+                    } else if ((unsigned char)last_char == shell_termios.c_cc[VLNEXT]) {
+                        printf("received VLNEXT\n");
+                    } else if ((unsigned char)last_char == shell_termios.c_cc[VEOL2]) {
+                        printf("received VEOL2\n");
+                    } else if (last_char == '\n') {
+                        line_ended = true;
+                    }
                 }
-                continue;
-            }
-            read_error_count = 0;
-            line_len += read_count;
-            // printf("read %zi chars; line_len=%zu\n", read_count, line_len);
-            char last_char = line_buf[line_len - 1];
-            // printf("last char is %c(%hhi)\n", last_char, last_char);
-
-            if ((unsigned char)last_char == shell_termios.c_cc[VINTR]) {
-                printf("received VINTR\n");
-            } else if ((unsigned char)last_char == shell_termios.c_cc[VQUIT]) {
-                printf("received VQUIT\n");
-            } else if ((unsigned char)last_char == shell_termios.c_cc[VERASE]) {
-                printf("received VERASE\n");
-            } else if ((unsigned char)last_char == shell_termios.c_cc[VKILL]) {
-                printf("received VKILL\n");
-            } else if ((unsigned char)last_char == shell_termios.c_cc[VEOF]) {
-                printf("received VEOF\n");
-            } else if ((unsigned char)last_char == shell_termios.c_cc[VTIME]) {
-                printf("received VTIME\n");
-            } else if ((unsigned char)last_char == shell_termios.c_cc[VMIN]) {
-                printf("received VMIN\n");
-            } else if ((unsigned char)last_char == shell_termios.c_cc[VSWTC]) {
-                printf("received VSWTC\n");
-            } else if ((unsigned char)last_char == shell_termios.c_cc[VSTART]) {
-                printf("received VSTART\n");
-            } else if ((unsigned char)last_char == shell_termios.c_cc[VSTOP]) {
-                printf("received VSTOP\n");
-            } else if ((unsigned char)last_char == shell_termios.c_cc[VSUSP]) {
-                printf("received VSUSP\n");
-            } else if ((unsigned char)last_char == shell_termios.c_cc[VEOL]) {
-                printf("received VEOL\n");
-            } else if ((unsigned char)last_char == shell_termios.c_cc[VREPRINT]) {
-                printf("received VREPRINT\n");
-            } else if ((unsigned char)last_char == shell_termios.c_cc[VDISCARD]) {
-                printf("received VDISCARD\n");
-            } else if ((unsigned char)last_char == shell_termios.c_cc[VWERASE]) {
-                printf("received VWERASE\n");
-            } else if ((unsigned char)last_char == shell_termios.c_cc[VLNEXT]) {
-                printf("received VLNEXT\n");
-            } else if ((unsigned char)last_char == shell_termios.c_cc[VEOL2]) {
-                printf("received VEOL2\n");
-            } else if (last_char == '\n') {
-                line_ended = true;
             }
         }
         if (line_len >= max_line_len) {
@@ -441,42 +474,49 @@ int main(int argc, char *argv[]) {
             line_len -= removed;
             line_buf[line_len] = '\0';
 
-            if (line_len > 0) {
-                if (strncmp(line_buf, "exit", line_len) == 0) {
-                    printf("exiting mshell ;_; T_T\n");
-                    exit(EXIT_SUCCESS);
-                    return 0;
-                }
-                if (strncmp(line_buf, "fg", line_len) == 0) {
-                    if (bg_jobs.count > 0) {
-                        fg_job = bg_jobs.items[bg_jobs.count - 1];
-                        daRemoveAt(&bg_jobs, bg_jobs.count - 1);
+            if (line_len <= 0) {
+                line_len = 0;
+                line_ended = false;
+                prompted_printed = false;
+                continue;
+            }
 
-                        printf("tcsetpgrp %i\n", fg_job.pgid);
-                        int tcsetpgrp_res = tcsetpgrp(STDIN_FILENO, fg_job.pgid);
-                        if (tcsetpgrp_res != 0) {
-                            perror("tcsetpgrp(STDIN_FILENO, getpgid(pid));");
-                        }
-                        tcsetattr(STDIN_FILENO, TCSAFLUSH, &fg_job.termios_conf);
-                        printf("pgrp before SIGCONT %i\n", tcgetpgrp(STDIN_FILENO));
+            if (strncmp(line_buf, "exit", line_len) == 0) {
+                printf("exiting mshell ;_; T_T\n");
+                exit(EXIT_SUCCESS);
+                return 0;
+            }
+            if (strncmp(line_buf, "fg", line_len) == 0) {
+                if (bg_jobs.count > 0) {
+                    fg_job = bg_jobs.items[bg_jobs.count - 1];
+                    daRemoveAt(&bg_jobs, bg_jobs.count - 1);
 
-                        if (killpg(fg_job.pgid, SIGCONT) < 0) {
-                            fprintf(stderr, "kill(%i, SIGCONT) failed\n", fg_job.pgid);
-                            perror("kill(pgid, SIGCONT)");
-                        }
-
-                    } else {
-                        printf("No background jobs\n");
+                    printf("tcsetpgrp %i\n", fg_job.pgid);
+                    int tcsetpgrp_res = tcsetpgrp(STDIN_FILENO, fg_job.pgid);
+                    if (tcsetpgrp_res != 0) {
+                        perror("tcsetpgrp(STDIN_FILENO, getpgid(pid));");
                     }
-                    line_len = 0;
-                    line_ended = false;
-                    continue;
+                    tcsetattr(STDIN_FILENO, TCSAFLUSH, &fg_job.termios_conf);
+                    printf("pgrp before SIGCONT %i\n", tcgetpgrp(STDIN_FILENO));
+
+                    if (killpg(fg_job.pgid, SIGCONT) < 0) {
+                        fprintf(stderr, "kill(%i, SIGCONT) failed\n", fg_job.pgid);
+                        perror("kill(pgid, SIGCONT)");
+                    }
+
+                } else {
+                    printf("No background jobs\n");
                 }
-                if (strncmp(line_buf, "cd", line_len) == 0) {
-                    line_len = 0;
-                    line_ended = false;
-                    continue;
-                }
+                line_len = 0;
+                line_ended = false;
+                prompted_printed = false;
+                continue;
+            }
+            if (strncmp(line_buf, "cd", line_len) == 0) {
+                line_len = 0;
+                line_ended = false;
+                prompted_printed = false;
+                continue;
             }
 
             StrArrayDA command_pipe_sequence = {0};
@@ -495,7 +535,7 @@ int main(int argc, char *argv[]) {
                     daAppend(&args, arg_token);
                     arg_token = strtok_r(NULL, args_delim, &args_strtok_saveptr);
                 }
-                /* Needed for correctness of 'exec()' */
+                /* 'exec()' requires null-terminated array */
                 daAppend(&args, NULL);
 
                 daAppend(&command_pipe_sequence, args);
@@ -509,7 +549,6 @@ int main(int argc, char *argv[]) {
                     fg_job.pgid = new_proc.pid;
                     daAppend(&fg_job.pipeline, new_proc);
                 } else {
-                    // TODO: free; dont reuse fg_job.pipeline
                     Job pipe_job = pipeCommands(&command_pipe_sequence);
                     assert(fg_job.pipeline.count == 0 &&
                            "PIPE: trying to add new process to non-empty fg_job.pipeline\n");
@@ -523,6 +562,7 @@ int main(int argc, char *argv[]) {
             daFree(&command_pipe_sequence);
             line_len = 0;
             line_ended = false;
+            prompted_printed = false;
         }
     }
     daFree(&fg_job.pipeline);
