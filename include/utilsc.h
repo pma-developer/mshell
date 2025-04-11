@@ -14,13 +14,18 @@ static const char digits[] =
     "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ@!#$%^&*()-_=+[]{}|;:'\",.<>?/`~";
 
 #define LENGTH(X) (sizeof(X) / sizeof((X)[0]))
+#if ENABLE_LOGS
+#define log(...) fprintf(stderr, __VA_ARGS__)
+#else 
+#define log(...) 
+#endif // ENABLE_LOGS
 #define BENCHMARK(code)                                                                                                \
     {                                                                                                                  \
         float startTime = (float)clock() / CLOCKS_PER_SEC;                                                             \
         code;                                                                                                          \
         float endTime = (float)clock() / CLOCKS_PER_SEC;                                                               \
         float timeElapsed = endTime - startTime;                                                                       \
-        printf("============\n Benchmark: %s \n %f s.\n============\n", #code, timeElapsed);                           \
+        log("============\n Benchmark: %s \n %f s.\n============\n", #code, timeElapsed);                              \
     }
 
 bool intToStr(char *buf, int n, int base);
@@ -30,7 +35,7 @@ size_t removeChar(char toRemove, char *cstr, size_t strLength);
 inline bool intToStr(char *buf, int n, int base) {
     const size_t maxValidBase = LENGTH(digits);
     if (base < 2 || base > maxValidBase) {
-        printf("only base 2-%zu are supported", maxValidBase);
+        log("only base 2-%zu are supported", maxValidBase);
         return false;
     }
     if (n == 0) {
@@ -110,7 +115,7 @@ typedef struct {
 #define daRemoveAt(da, index)                                                                                          \
     do {                                                                                                               \
         if ((da)->count <= 0 || (da)->count <= (index)) {                                                              \
-            fprintf(stderr, "Index %zu is out of bounds(da->count=%zu)\n", index, (da)->count);                        \
+            log("Index %zu is out of bounds(da->count=%zu)\n", index, (da)->count);                        \
             break;                                                                                                     \
         }                                                                                                              \
         for (size_t i = index; i < (da)->count - 1; i++) {                                                             \
