@@ -35,6 +35,7 @@ typedef enum ProcStatus {
     PROC_STATUS_TERMINATED,
     PROC_STATUS_SUSPENDED,
     PROC_STATUS_RUNNING,
+    PROC_STATUS_NOT_CHANGED,
 } ProcStatus;
 
 typedef struct {
@@ -88,11 +89,16 @@ int epoll_fd;
 void resetTermios() { tcsetattr(STDIN_FILENO, TCSAFLUSH, &glb.prev_termios); }
 
 void freeProcessFields(const Process *process) {
-    log("freeing process->name %p", process->name);
+    log("freeing process->name %p\n", process->name);
     free((void *)process->name);
 }
 
-void print_job(const Job *job) {
+void printProcess(const Process *proc) {
+    log("Process PID: %d\n", proc->pid);
+    log("Process Name: %s\n", proc->name);
+    log("Process Status: %d\n", (int)proc->status);
+}
+void printJob(const Job *job) {
     if (job == NULL) {
         log("Job is NULL.\n");
         return;
@@ -102,9 +108,7 @@ void print_job(const Job *job) {
 
     size_t index = 0;
     while (index < job->pipeline.count) {
-        log("Process PID: %d\n", job->pipeline.items[index].pid);
-        log("Process Name: %s\n", job->pipeline.items[index].name);
-        log("Process Status: %d\n", (int)job->pipeline.items[index].status);
+        printProcess(&job->pipeline.items[index]);
         log("------------------------\n");
         index++;
     }
@@ -138,24 +142,6 @@ void printWStatusDesc(int wstatus, const char *procname, pid_t pid) {
     }
 }
 
-ProcStatus waitProcBlocking(pid_t pid, const char *procname) {
-    int wstatus = 0;
-    waitpid(pid, &wstatus, WUNTRACED);
-    printWStatusDesc(wstatus, procname, pid);
-    bool terminated = WIFEXITED(wstatus) || WIFSIGNALED(wstatus);
-    bool suspended = WIFSTOPPED(wstatus);
-
-    if (!(terminated ^ suspended)) {
-        log("%s(%i) exited with undefined status", procname, pid);
-        return PROC_STATUS_UNDEFINED;
-    }
-    return terminated ? PROC_STATUS_TERMINATED : PROC_STATUS_SUSPENDED;
-}
-
-ProcStatus continueAndWait(pid_t pgid, const struct termios *proc_termios, const char *procname) {
-    return waitProcBlocking(pgid, procname);
-}
-
 void ignoreStopSignals(bool ignore) {
     __sighandler_t handler = ignore ? SIG_IGN : SIG_DFL;
 
@@ -166,15 +152,16 @@ void ignoreStopSignals(bool ignore) {
     signal(SIGTTOU, handler);
 }
 
-ProcStatus getProcStatus(pid_t pid) {
+ProcStatus waitProcStatus(pid_t pid) {
     int wstatus = 0;
     pid_t wait_res = waitpid(pid, &wstatus, WNOHANG | WUNTRACED | WCONTINUED);
     if (wait_res == -1) {
-        return PROC_STATUS_UNDEFINED;
+        log("errno=%i\n", errno);
         perror("waitpid(WNOHANG | WUNTRACED)");
+        return PROC_STATUS_UNDEFINED;
     }
     if (wait_res == 0) {
-        return PROC_STATUS_RUNNING;
+        return PROC_STATUS_NOT_CHANGED;
     }
     if (wait_res > 0) {
         bool terminated = WIFEXITED(wstatus) || WIFSIGNALED(wstatus);
@@ -189,14 +176,17 @@ ProcStatus getProcStatus(pid_t pid) {
     return PROC_STATUS_UNDEFINED;
 }
 
-char *cloneStr(const char* src) {
+char *cloneStr(const char *src) {
     char *copy = malloc(sizeof(char) * (strlen(src) + 1));
     strcpy(copy, src);
     return copy;
 }
 
 Process execCommand(const StrDA *command, pid_t pgid, bool set_pg_to_fg, PipeModeFlags pipemode, int pipefds[2]) {
-    epoll_ctl(epoll_fd, EPOLL_CTL_DEL, STDIN_FILENO, NULL);
+    if (set_pg_to_fg) {
+        epoll_ctl(epoll_fd, EPOLL_CTL_DEL, STDIN_FILENO, NULL);
+    }
+
     int pid = fork();
     if (pid == -1) {
         perror("fork()");
@@ -242,15 +232,9 @@ Process execCommand(const StrDA *command, pid_t pgid, bool set_pg_to_fg, PipeMod
     process.pid = pid;
     process.name = cloneStr(command->items[0]);
     log("allocated process.name %s(%p)", process.name, process.name);
-    process.status = getProcStatus(pid);
-    if (process.status == PROC_STATUS_UNDEFINED) {
-        log("%s(%i) created with undefined status", process.name, pid);
-    } else if (process.status != PROC_STATUS_RUNNING) {
-        log("%s(%i) created but not running", process.name, pid);
-    }
+    process.status = PROC_STATUS_RUNNING;
     return process;
 }
-
 
 Job pipeCommands(const StrArrayDA *commandsDa) {
     int pipefds[2];
@@ -269,7 +253,6 @@ Job pipeCommands(const StrArrayDA *commandsDa) {
     close(pipefds[PIPE_WRITE]);
     close(pipefds[PIPE_READ]);
 
-    // tcgetattr(STDIN_FILENO, &pipe_job.termios_conf);
     return pipe_job;
 }
 
@@ -283,8 +266,19 @@ bool anyProcessStatus(const ProcessDA *process_da, ProcStatus status) {
 }
 
 void updateProcStatuses(const ProcessDA *process_da) {
-    for (size_t i = 0; i < process_da->count; ++i) {
-        process_da->items[i].status = getProcStatus(process_da->items[i].pid);
+    for (size_t i = 0; i < process_da->count; i++) {
+        Process *proc = &process_da->items[i];
+        if(proc->status == PROC_STATUS_TERMINATED) {
+            continue;
+        }
+
+        ProcStatus proc_status = waitProcStatus(proc->pid);
+        if (proc_status == PROC_STATUS_UNDEFINED) {
+            log("%s(%i) returned PROC_STATUS_UNDEFINED\n", proc->name, proc->pid);
+        }
+        if (proc_status != PROC_STATUS_NOT_CHANGED) {
+            proc->status = proc_status;
+        }
     }
 }
 
@@ -292,7 +286,8 @@ ProcStatus getPipelineStatus(const ProcessDA *process_da) {
     bool anyUndefined = false, anyRunning = false, anySuspended = false, anyTerminated = false;
 
     for (size_t i = 0; i < process_da->count; ++i) {
-        switch (process_da->items[i].status) {
+        const Process *proc = &process_da->items[i];
+        switch (proc->status) {
         case PROC_STATUS_UNDEFINED:
             anyUndefined = true;
             break;
@@ -308,6 +303,9 @@ ProcStatus getPipelineStatus(const ProcessDA *process_da) {
         case PROC_STATUS_TERMINATED:
             anyTerminated = true;
             break;
+        case PROC_STATUS_NOT_CHANGED:
+            log("process_da contains process with invalid status (%s(%i))", proc->name, proc->pid);
+            return PROC_STATUS_UNDEFINED;
         }
     }
 
@@ -445,20 +443,13 @@ int main(int argc, char *argv[]) {
                         perror("read(sig_chld_fd)");
                         continue;
                     }
-                    pid_t sender_pid = (pid_t)sig_chld_info.ssi_pid;
 
-                    size_t pid_index = 0;
-                    if (indexOfPid(&fg_job.pipeline, sender_pid, &pid_index)) {
-                        fg_job.pipeline.items[pid_index].status = getProcStatus(sender_pid);
-                        fg_status = getPipelineStatus(&fg_job.pipeline);
+                    updateProcStatuses(&fg_job.pipeline);
+                    for (size_t i = 0; i < bg_jobs.count; i++) {
+                        updateProcStatuses(&bg_jobs.items[i].pipeline);
                     }
-                    for (size_t i = 0; i < bg_jobs.count; ++i) {
-                        Job *job = &bg_jobs.items[i];
-                        if (indexOfPid(&job->pipeline, sender_pid, &pid_index)) {
-                            ProcStatus senderStatus = getProcStatus(sender_pid);
-                            job->pipeline.items[pid_index].status = senderStatus;
-                        }
-                    }
+                    fg_status = getPipelineStatus(&fg_job.pipeline);
+
                     log("fg_status %i\n", fg_status);
                     if (fg_status == PROC_STATUS_SUSPENDED || fg_status == PROC_STATUS_TERMINATED) {
                         if (fg_status == PROC_STATUS_SUSPENDED) {
@@ -571,7 +562,7 @@ int main(int argc, char *argv[]) {
                         log("bg_jobs.count %zu\n", bg_jobs.count);
                         if (bg_jobs.count > 0) {
                             fg_job = bg_jobs.items[bg_jobs.count - 1];
-                            print_job(&fg_job);
+                            printJob(&fg_job);
                             daRemoveAt(&bg_jobs, bg_jobs.count - 1);
 
                             log("tcsetpgrp %i\n", fg_job.pgid);
@@ -585,6 +576,7 @@ int main(int argc, char *argv[]) {
                             tcsetattr(STDIN_FILENO, TCSAFLUSH, &fg_job.termios_conf);
                             log("pgrp before SIGCONT %i\n", tcgetpgrp(STDIN_FILENO));
 
+                            /* TODO: all process statuses in a pipeline are probably should be set to PROC_STATUS_RUNNING */
                             if (killpg(fg_job.pgid, SIGCONT) < 0) {
                                 log("kill(%i, SIGCONT) failed\n", fg_job.pgid);
                                 perror("kill(pgid, SIGCONT)");
@@ -637,8 +629,9 @@ int main(int argc, char *argv[]) {
                             daAppend(&fg_job.pipeline, new_proc);
                         } else {
                             Job pipe_job = pipeCommands(&command_pipe_sequence);
-                            assert(fg_job.pipeline.count == 0 &&
-                                   "PIPE: trying to add new process to non-empty fg_job.pipeline\n");
+                            assert(fg_job.pipeline.items == NULL && fg_job.pipeline.count == 0 &&
+                                   "trying to add new process to non-empty fg_job.pipeline\n");
+                            fg_job = pipe_job;
                             // daAppend(&fg_job.pipeline, new_proc);
                         }
                     } else {
