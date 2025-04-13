@@ -24,12 +24,6 @@ typedef enum PipeFdType {
     PIPE_WRITE = 1,
 } PipeFdType;
 
-typedef enum PipeModeFlags {
-    PIPE_MODE_NONE = 0,
-    PIPE_MODE_READ_TO_STDIN = 1 << 1,
-    PIPE_MODE_STDOUT_TO_WRITE = 1 << 2,
-} PipeModeFlags;
-
 typedef enum ProcStatus {
     PROC_STATUS_UNDEFINED,
     PROC_STATUS_TERMINATED,
@@ -182,7 +176,9 @@ char *cloneStr(const char *src) {
     return copy;
 }
 
-Process execCommand(const StrDA *command, pid_t pgid, bool set_pg_to_fg, PipeModeFlags pipemode, int pipefds[2]) {
+/* TODO: make PipeParams struct; replace last 4 arguments with 'const PipeParams *pipe_params' */
+Process execCommand(const StrDA *command, pid_t pgid, bool set_pg_to_fg, int stdin_fd, int stdout_fd, int *fds_to_close,
+                    size_t fds_count) {
     if (set_pg_to_fg) {
         epoll_ctl(epoll_fd, EPOLL_CTL_DEL, STDIN_FILENO, NULL);
     }
@@ -208,18 +204,18 @@ Process execCommand(const StrDA *command, pid_t pgid, bool set_pg_to_fg, PipeMod
         if (tcsetpgrp_res != 0) {
             perror("tcsetpgrp(STDIN_FILENO, getpgid(pid));");
         }
-        if (pipefds != NULL) {
-            log("configuring pipe\n");
-            if (pipemode & PIPE_MODE_STDOUT_TO_WRITE) {
-                dup2(pipefds[PIPE_WRITE], STDOUT_FILENO);
-            }
-            close(pipefds[PIPE_WRITE]);
 
-            if (pipemode & PIPE_MODE_READ_TO_STDIN) {
-                dup2(pipefds[PIPE_READ], STDIN_FILENO);
-            }
-            close(pipefds[PIPE_READ]);
+        log("configuring pipe\n");
+        if (stdin_fd > 0) {
+            dup2(stdin_fd, STDIN_FILENO);
         }
+        if (stdout_fd > 0) {
+            dup2(stdout_fd, STDOUT_FILENO);
+        }
+        for (size_t i = 0; i < fds_count; ++i) {
+            close(fds_to_close[i]);
+        }
+
         int execvp_res = execvp(command->items[0], command->items);
         if (execvp_res == -1) {
             perror("execvp:");
@@ -237,21 +233,31 @@ Process execCommand(const StrDA *command, pid_t pgid, bool set_pg_to_fg, PipeMod
 }
 
 Job pipeCommands(const StrArrayDA *commandsDa) {
-    int pipefds[2];
-    if (pipe(pipefds)) {
-        perror("pipe(pipefds)");
-        return (Job){0};
+    size_t pipefds_count = 2 * (commandsDa->count - 1);
+    int pipefds[pipefds_count];
+    for (size_t i = 0; i < pipefds_count; i += 2) {
+        if (pipe(pipefds + i)) {
+            perror("pipe(pipefds)");
+            return (Job){0};
+        }
     }
     Job pipe_job = {0};
-    Process proc0 = execCommand(&commandsDa->items[0], 0, true, PIPE_MODE_STDOUT_TO_WRITE, pipefds);
-    Process proc1 = execCommand(&commandsDa->items[1], proc0.pid, false, PIPE_MODE_READ_TO_STDIN, pipefds);
+    Process first_proc = execCommand(&commandsDa->items[0], 0, true, 0, pipefds[PIPE_WRITE], pipefds, pipefds_count);
+    daAppend(&pipe_job.pipeline, first_proc);
+    pipe_job.pgid = first_proc.pid;
 
-    pipe_job.pgid = proc0.pid;
-    daAppend(&pipe_job.pipeline, proc0);
-    daAppend(&pipe_job.pipeline, proc1);
+    for (size_t i = 1; i < commandsDa->count - 1; ++i) {
+        size_t fd_i = (i - 1) * 2;
+        Process proc = execCommand(&commandsDa->items[i], first_proc.pid, false, pipefds[fd_i], pipefds[fd_i + 3], pipefds, pipefds_count);
+        daAppend(&pipe_job.pipeline, proc);
+    }
 
-    close(pipefds[PIPE_WRITE]);
-    close(pipefds[PIPE_READ]);
+    Process last_proc = execCommand(&commandsDa->items[commandsDa->count - 1], first_proc.pid, false, pipefds[pipefds_count - 2], 0, pipefds, pipefds_count);
+    daAppend(&pipe_job.pipeline, last_proc);
+
+    for (size_t i = 0; i < pipefds_count; ++i) {
+        close(pipefds[i]);
+    }
 
     return pipe_job;
 }
@@ -268,7 +274,7 @@ bool anyProcessStatus(const ProcessDA *process_da, ProcStatus status) {
 void updateProcStatuses(const ProcessDA *process_da) {
     for (size_t i = 0; i < process_da->count; i++) {
         Process *proc = &process_da->items[i];
-        if(proc->status == PROC_STATUS_TERMINATED) {
+        if (proc->status == PROC_STATUS_TERMINATED) {
             continue;
         }
 
@@ -576,7 +582,8 @@ int main(int argc, char *argv[]) {
                             tcsetattr(STDIN_FILENO, TCSAFLUSH, &fg_job.termios_conf);
                             log("pgrp before SIGCONT %i\n", tcgetpgrp(STDIN_FILENO));
 
-                            /* TODO: all process statuses in a pipeline are probably should be set to PROC_STATUS_RUNNING */
+                            /* TODO: all process statuses in a pipeline are probably should be set to
+                             * PROC_STATUS_RUNNING */
                             if (killpg(fg_job.pgid, SIGCONT) < 0) {
                                 log("kill(%i, SIGCONT) failed\n", fg_job.pgid);
                                 perror("kill(pgid, SIGCONT)");
@@ -621,8 +628,7 @@ int main(int argc, char *argv[]) {
 
                     if (command_pipe_sequence.count > 0) {
                         if (command_pipe_sequence.count == 1) {
-                            Process new_proc =
-                                execCommand(&command_pipe_sequence.items[0], 0, true, PIPE_MODE_NONE, NULL);
+                            Process new_proc = execCommand(&command_pipe_sequence.items[0], 0, true, 0, 0, NULL, 0);
                             assert(fg_job.pipeline.items == NULL && fg_job.pipeline.count == 0 &&
                                    "trying to add new process to non-empty fg_job.pipeline\n");
                             fg_job.pgid = new_proc.pid;
