@@ -112,12 +112,12 @@ void printWStatusDesc(int wstatus, const char *procname, pid_t pid) {
     if (WIFEXITED(wstatus)) {
         int exit_status = WEXITSTATUS(wstatus);
         if (exit_status != 0) {
-            printf("%s(%i) exited with status %i\n", procname, pid, exit_status);
+            printf("\n%s(%i) exited with status %i\n", procname, pid, exit_status);
         }
     }
     if (WIFSIGNALED(wstatus)) {
         int sig_num = WTERMSIG(wstatus);
-        printf("%s(%i) terminated by signal %i\n", procname, pid, sig_num);
+        printf("\n%s(%i) terminated by signal %i\n", procname, pid, sig_num);
 
         bool produced_core_dump = false;
 #ifdef WCOREDUMP
@@ -129,10 +129,10 @@ void printWStatusDesc(int wstatus, const char *procname, pid_t pid) {
     }
     if (WIFSTOPPED(wstatus)) {
         int sig_num = WSTOPSIG(wstatus);
-        printf("%s(%i) stopped by signal %i\n", procname, pid, sig_num);
+        printf("\n%s(%i) stopped by signal %i\n", procname, pid, sig_num);
     }
     if (WIFCONTINUED(wstatus)) {
-        printf("%s(%i) continued\n", procname, pid);
+        printf("\n%s(%i) continued\n", procname, pid);
     }
 }
 
@@ -273,7 +273,8 @@ bool anyProcessStatus(const ProcessDA *process_da, ProcStatus status) {
     return false;
 }
 
-void updateProcStatuses(const ProcessDA *process_da) {
+bool updateProcStatuses(const ProcessDA *process_da) {
+    bool any_updated = false;
     for (size_t i = 0; i < process_da->count; ++i) {
         Process *proc = &process_da->items[i];
         if (proc->status == PROC_STATUS_TERMINATED) {
@@ -286,8 +287,10 @@ void updateProcStatuses(const ProcessDA *process_da) {
         }
         if (proc_status != PROC_STATUS_NOT_CHANGED) {
             proc->status = proc_status;
+            any_updated = true;
         }
     }
+    return any_updated;
 }
 
 ProcStatus getPipelineStatus(const ProcessDA *process_da) {
@@ -455,12 +458,14 @@ int main(int argc, char *argv[]) {
                     updateProcStatuses(&fg_job.pipeline);
                     for (size_t i = 0; i < bg_jobs.count; ++i) {
                         Job *bg_job = &bg_jobs.items[i];
-                        printf("\n");
-                        updateProcStatuses(&bg_job->pipeline);
+                        bool any_updated = updateProcStatuses(&bg_job->pipeline);
 
                         ProcStatus bg_job_status = getPipelineStatus(&bg_job->pipeline);
-                        if (bg_job_status == PROC_STATUS_SUSPENDED || bg_job_status == PROC_STATUS_TERMINATED) {
+                        if ((bg_job_status == PROC_STATUS_SUSPENDED && any_updated)
+                            || bg_job_status == PROC_STATUS_TERMINATED) {
+
                             if (bg_job_status == PROC_STATUS_SUSPENDED) {
+                                log("termios of bg_job(%i) set\n", bg_job->pgid);
                                 tcgetattr(STDIN_FILENO, &bg_job->termios_conf);
                             } else if (bg_job_status == PROC_STATUS_TERMINATED) {
                                 daRemoveAt(&bg_jobs, i);
@@ -601,12 +606,7 @@ int main(int argc, char *argv[]) {
                             if (killpg(fg_job.pgid, SIGCONT) < 0) {
                                 log("kill(%i, SIGCONT) failed\n", fg_job.pgid);
                                 perror("kill(pgid, SIGCONT)");
-                            } else {
-                                for (size_t i = 0; i < fg_job.pipeline.count; ++i) {
-                                    fg_job.pipeline.items[i].status = PROC_STATUS_RUNNING;
-                                }
                             }
-
                         } else {
                             printf("No background jobs\n");
                             printPrompt();
@@ -617,7 +617,6 @@ int main(int argc, char *argv[]) {
                     }
                     if (strncmp(line_buf, "bg", line_len) == 0) {
                         if (bg_jobs.count > 0) {
-
                             Job *last_bg_job = &bg_jobs.items[bg_jobs.count - 1];
 
                             if (killpg(last_bg_job->pgid, SIGCONT) < 0) {
