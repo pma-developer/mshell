@@ -456,7 +456,7 @@ int main(int argc, char *argv[]) {
                     for (size_t i = 0; i < bg_jobs.count; ++i) {
                         Job *bg_job = &bg_jobs.items[i];
                         printf("\n");
-                        updateProcStatuses(&bg_jobs.items[i].pipeline);
+                        updateProcStatuses(&bg_job->pipeline);
 
                         ProcStatus bg_job_status = getPipelineStatus(&bg_job->pipeline);
                         if (bg_job_status == PROC_STATUS_SUSPENDED || bg_job_status == PROC_STATUS_TERMINATED) {
@@ -584,28 +584,49 @@ int main(int argc, char *argv[]) {
                         return 0;
                     }
                     if (strncmp(line_buf, "fg", line_len) == 0) {
-                        log("bg_jobs.count %zu\n", bg_jobs.count);
                         if (bg_jobs.count > 0) {
                             fg_job = bg_jobs.items[bg_jobs.count - 1];
                             printJob(&fg_job);
                             daRemoveAt(&bg_jobs, bg_jobs.count - 1);
 
-                            log("tcsetpgrp %i\n", fg_job.pgid);
-
                             /* transfer control from shell to fg_job */
                             epoll_ctl(epoll_fd, EPOLL_CTL_DEL, STDIN_FILENO, NULL);
+                            log("tcsetpgrp %i\n", fg_job.pgid);
                             int tcsetpgrp_res = tcsetpgrp(STDIN_FILENO, fg_job.pgid);
                             if (tcsetpgrp_res != 0) {
                                 perror("tcsetpgrp(STDIN_FILENO, getpgid(pid));");
                             }
                             tcsetattr(STDIN_FILENO, TCSAFLUSH, &fg_job.termios_conf);
-                            log("pgrp before SIGCONT %i\n", tcgetpgrp(STDIN_FILENO));
 
-                            /* TODO: all process statuses in a pipeline are probably should be set to
-                             * PROC_STATUS_RUNNING */
                             if (killpg(fg_job.pgid, SIGCONT) < 0) {
                                 log("kill(%i, SIGCONT) failed\n", fg_job.pgid);
                                 perror("kill(pgid, SIGCONT)");
+                            } else {
+                                for (size_t i = 0; i < fg_job.pipeline.count; ++i) {
+                                    fg_job.pipeline.items[i].status = PROC_STATUS_RUNNING;
+                                }
+                            }
+
+                        } else {
+                            printf("No background jobs\n");
+                            printPrompt();
+                        }
+                        line_len = 0;
+                        line_ended = false;
+                        continue;
+                    }
+                    if (strncmp(line_buf, "bg", line_len) == 0) {
+                        if (bg_jobs.count > 0) {
+
+                            Job *last_bg_job = &bg_jobs.items[bg_jobs.count - 1];
+
+                            if (killpg(last_bg_job->pgid, SIGCONT) < 0) {
+                                log("kill(%i, SIGCONT) failed\n", last_bg_job->pgid);
+                                perror("kill(pgid, SIGCONT)");
+                            } else {
+                                for (size_t i = 0; i < last_bg_job->pipeline.count; ++i) {
+                                    last_bg_job->pipeline.items[i].status = PROC_STATUS_RUNNING;
+                                }
                             }
 
                         } else {
