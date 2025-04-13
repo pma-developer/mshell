@@ -16,8 +16,8 @@ static const char digits[] =
 #define LENGTH(X) (sizeof(X) / sizeof((X)[0]))
 #if ENABLE_LOGS
 #define log(...) fprintf(stderr, __VA_ARGS__)
-#else 
-#define log(...) 
+#else
+#define log(...)
 #endif // ENABLE_LOGS
 #define BENCHMARK(code)                                                                                                \
     {                                                                                                                  \
@@ -89,19 +89,19 @@ typedef struct {
 #define daResize(da, new_count)                                                                                        \
     do {                                                                                                               \
         if ((new_count) > (da)->capacity) {                                                                            \
-            size_t new_capacity = (da)->capacity;                                                                      \
+            size_t _new_capacity = (da)->capacity;                                                                     \
             if ((da)->capacity == 0) {                                                                                 \
-                new_capacity = da_init_capacity;                                                                       \
+                _new_capacity = da_init_capacity;                                                                      \
             }                                                                                                          \
-            while (new_capacity < (new_count)) {                                                                       \
-                new_capacity *= 2;                                                                                     \
+            while (_new_capacity < (new_count)) {                                                                      \
+                _new_capacity *= 2;                                                                                    \
             }                                                                                                          \
-            void *new_items = realloc((void *)(da)->items, new_capacity * sizeof(*(da)->items));                       \
-            if (new_items == NULL) {                                                                                   \
-                assert(new_items != NULL && "Error during DA realloc");                                                \
+            void *_new_items = realloc((void *)(da)->items, _new_capacity * sizeof(*(da)->items));                     \
+            if (_new_items == NULL) {                                                                                  \
+                assert(_new_items != NULL && "Error during DA realloc");                                               \
             }                                                                                                          \
-            (da)->capacity = new_capacity;                                                                             \
-            (da)->items = (typeof((da)->items))new_items;                                                              \
+            (da)->capacity = _new_capacity;                                                                            \
+            (da)->items = (typeof((da)->items))_new_items;                                                             \
         }                                                                                                              \
         (da)->count = new_count;                                                                                       \
     } while (false);
@@ -115,11 +115,11 @@ typedef struct {
 #define daRemoveAt(da, index)                                                                                          \
     do {                                                                                                               \
         if ((da)->count <= 0 || (da)->count <= (index)) {                                                              \
-            log("Index %zu is out of bounds(da->count=%zu)\n", index, (da)->count);                        \
+            log("Index %zu is out of bounds(da->count=%zu)\n", index, (da)->count);                                    \
             break;                                                                                                     \
         }                                                                                                              \
-        for (size_t i = index; i < (da)->count - 1; i++) {                                                             \
-            (da)->items[i] = (da)->items[i + 1];                                                                       \
+        for (size_t _i = index; _i < (da)->count - 1; _i++) {                                                          \
+            (da)->items[_i] = (da)->items[_i + 1];                                                                     \
         }                                                                                                              \
         daResize((da), (da)->count - 1);                                                                               \
     } while (false);

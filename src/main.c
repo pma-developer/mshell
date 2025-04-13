@@ -218,7 +218,7 @@ Process execCommand(const StrDA *command, pid_t pgid, bool set_pg_to_fg, int std
 
         int execvp_res = execvp(command->items[0], command->items);
         if (execvp_res == -1) {
-            perror("execvp:");
+            printf("Error executing: \"%s\"\n%s\n", command->items[0], strerror(errno));
             // log("error executing: \"%s\"\n", command->items[0]);
         }
         exit(EXIT_FAILURE);
@@ -247,12 +247,14 @@ Job pipeCommands(const StrArrayDA *commandsDa) {
     pipe_job.pgid = first_proc.pid;
 
     for (size_t i = 1; i < commandsDa->count - 1; ++i) {
-        size_t fd_i = (i - 1) * 2;
-        Process proc = execCommand(&commandsDa->items[i], first_proc.pid, false, pipefds[fd_i], pipefds[fd_i + 3], pipefds, pipefds_count);
+        size_t fd_i = 2 * (i - 1);
+        Process proc = execCommand(&commandsDa->items[i], first_proc.pid, false, pipefds[fd_i], pipefds[fd_i + 3],
+                                   pipefds, pipefds_count);
         daAppend(&pipe_job.pipeline, proc);
     }
 
-    Process last_proc = execCommand(&commandsDa->items[commandsDa->count - 1], first_proc.pid, false, pipefds[pipefds_count - 2], 0, pipefds, pipefds_count);
+    Process last_proc = execCommand(&commandsDa->items[commandsDa->count - 1], first_proc.pid, false,
+                                    pipefds[pipefds_count - 2], 0, pipefds, pipefds_count);
     daAppend(&pipe_job.pipeline, last_proc);
 
     for (size_t i = 0; i < pipefds_count; ++i) {
@@ -272,7 +274,7 @@ bool anyProcessStatus(const ProcessDA *process_da, ProcStatus status) {
 }
 
 void updateProcStatuses(const ProcessDA *process_da) {
-    for (size_t i = 0; i < process_da->count; i++) {
+    for (size_t i = 0; i < process_da->count; ++i) {
         Process *proc = &process_da->items[i];
         if (proc->status == PROC_STATUS_TERMINATED) {
             continue;
@@ -451,9 +453,26 @@ int main(int argc, char *argv[]) {
                     }
 
                     updateProcStatuses(&fg_job.pipeline);
-                    for (size_t i = 0; i < bg_jobs.count; i++) {
+                    for (size_t i = 0; i < bg_jobs.count; ++i) {
+                        Job *bg_job = &bg_jobs.items[i];
+                        printf("\n");
                         updateProcStatuses(&bg_jobs.items[i].pipeline);
+
+                        ProcStatus bg_job_status = getPipelineStatus(&bg_job->pipeline);
+                        if (bg_job_status == PROC_STATUS_SUSPENDED || bg_job_status == PROC_STATUS_TERMINATED) {
+                            if (bg_job_status == PROC_STATUS_SUSPENDED) {
+                                tcgetattr(STDIN_FILENO, &bg_job->termios_conf);
+                            } else if (bg_job_status == PROC_STATUS_TERMINATED) {
+                                daRemoveAt(&bg_jobs, i);
+                                for (size_t i = 0; i < bg_job->pipeline.count; ++i) {
+                                    freeProcessFields(&bg_job->pipeline.items[i]);
+                                }
+                                daFree(&bg_job->pipeline);
+                            }
+                            printPrompt();
+                        }
                     }
+
                     fg_status = getPipelineStatus(&fg_job.pipeline);
 
                     log("fg_status %i\n", fg_status);
@@ -644,7 +663,7 @@ int main(int argc, char *argv[]) {
                         printPrompt();
                     }
 
-                    for (int i = 0; i < command_pipe_sequence.count; i++) {
+                    for (int i = 0; i < command_pipe_sequence.count; ++i) {
                         daFree(&command_pipe_sequence.items[i]);
                     }
                     daFree(&command_pipe_sequence);
