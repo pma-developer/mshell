@@ -171,7 +171,12 @@ ProcStatus waitProcStatus(pid_t pid) {
 }
 
 char *cloneStr(const char *src) {
-    char *copy = malloc(sizeof(char) * (strlen(src) + 1));
+    size_t len = strlen(src) + 1;
+    char *copy = malloc(sizeof(char) * len);
+    if (copy == NULL) {
+        perror("malloc in cloneStr");
+        return NULL;
+    }
     strcpy(copy, src);
     return copy;
 }
@@ -186,6 +191,7 @@ Process execCommand(const StrDA *command, pid_t pgid, bool set_pg_to_fg, int std
     int pid = fork();
     if (pid == -1) {
         perror("fork()");
+        return (Process){0};
     } else if (pid == 0) {
 
         int setpgid_res = setpgid(pid, pgid);
@@ -196,6 +202,7 @@ Process execCommand(const StrDA *command, pid_t pgid, bool set_pg_to_fg, int std
 
         /* Reseting termios */
         resetTermios();
+
         ignoreStopSignals(false);
 
         if (setpgid_res != 0) {
@@ -227,6 +234,9 @@ Process execCommand(const StrDA *command, pid_t pgid, bool set_pg_to_fg, int std
     Process process = {0};
     process.pid = pid;
     process.name = cloneStr(command->items[0]);
+    if (process.name == NULL) {
+        return (Process){0};
+    }
     log("allocated process.name %s(%p)", process.name, process.name);
     process.status = PROC_STATUS_RUNNING;
     return process;
@@ -243,6 +253,9 @@ Job pipeCommands(const StrArrayDA *commandsDa) {
     }
     Job pipe_job = {0};
     Process first_proc = execCommand(&commandsDa->items[0], 0, true, 0, pipefds[PIPE_WRITE], pipefds, pipefds_count);
+    if (first_proc.pid == 0) {
+        return (Job){0};
+    }
     daAppend(&pipe_job.pipeline, first_proc);
     pipe_job.pgid = first_proc.pid;
 

@@ -33,11 +33,6 @@ $(BUILD_DIR)/%.c.o: %.c
 	mkdir -p $(dir $@)
 	gcc $(CPPFLAGS) $(CFLAGS) -c $< -o $@
 
-# Build step for C++ source
-$(BUILD_DIR)/%.cpp.o: %.cpp
-	mkdir -p $(dir $@)
-	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -c $< -o $@
-
 .PHONY: clean run
 run: $(BUILD_DIR)/$(TARGET_EXEC)
 	./$(BUILD_DIR)/$(TARGET_EXEC)
