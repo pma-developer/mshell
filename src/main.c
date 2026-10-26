@@ -157,15 +157,19 @@ ProcStatus waitProcStatus(pid_t pid) {
     if (wait_res == 0) {
         return PROC_STATUS_NOT_CHANGED;
     }
-    if (wait_res > 0) {
-        bool terminated = WIFEXITED(wstatus) || WIFSIGNALED(wstatus);
-        bool suspended = WIFSTOPPED(wstatus);
+    if (WIFEXITED(wstatus) || WIFSIGNALED(wstatus)) {
         printWStatusDesc(wstatus, "proc", pid);
+        return PROC_STATUS_TERMINATED;
+    }
 
-        if (!(terminated ^ suspended)) {
-            return PROC_STATUS_UNDEFINED;
-        }
-        return terminated ? PROC_STATUS_TERMINATED : PROC_STATUS_SUSPENDED;
+    if (WIFSTOPPED(wstatus)) {
+        printWStatusDesc(wstatus, "proc", pid);
+        return PROC_STATUS_SUSPENDED;
+    }
+
+    if (WIFCONTINUED(wstatus)) {
+        printWStatusDesc(wstatus, "proc", pid);
+        return PROC_STATUS_RUNNING;
     }
     return PROC_STATUS_UNDEFINED;
 }
