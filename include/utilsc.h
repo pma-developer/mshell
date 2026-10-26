@@ -15,9 +15,9 @@ static const char digits[] =
 
 #define LENGTH(X) (sizeof(X) / sizeof((X)[0]))
 #if ENABLE_LOGS
-#define log(...) fprintf(stderr, __VA_ARGS__)
+#define LOG(...) fprintf(stderr, __VA_ARGS__)
 #else
-#define log(...)
+#define LOG(...)
 #endif // ENABLE_LOGS
 #define BENCHMARK(code)                                                                                                \
     {                                                                                                                  \
@@ -25,7 +25,7 @@ static const char digits[] =
         code;                                                                                                          \
         float endTime = (float)clock() / CLOCKS_PER_SEC;                                                               \
         float timeElapsed = endTime - startTime;                                                                       \
-        log("============\n Benchmark: %s \n %f s.\n============\n", #code, timeElapsed);                              \
+        LOG("============\n Benchmark: %s \n %f s.\n============\n", #code, timeElapsed);                              \
     }
 
 bool intToStr(char *buf, int n, int base);
@@ -35,7 +35,7 @@ size_t removeChar(char toRemove, char *cstr, size_t strLength);
 inline bool intToStr(char *buf, int n, int base) {
     const size_t maxValidBase = LENGTH(digits);
     if (base < 2 || base > maxValidBase) {
-        log("only base 2-%zu are supported", maxValidBase);
+        LOG("only base 2-%zu are supported", maxValidBase);
         return false;
     }
     if (n == 0) {
@@ -79,57 +79,58 @@ inline size_t removeChar(char toRemove, char *str, size_t strLength) {
     return removed;
 }
 
-static const size_t da_init_capacity = 8;
+static const size_t vec_init_capacity = 8;
 
 typedef struct {
     char *data;
     size_t count;
 } StringView;
 
-#define daResize(da, new_count)                                                                                        \
+#define vecResize(vec, new_count)                                                                                        \
     do {                                                                                                               \
-        if ((new_count) > (da)->capacity) {                                                                            \
-            size_t _new_capacity = (da)->capacity;                                                                     \
-            if ((da)->capacity == 0) {                                                                                 \
-                _new_capacity = da_init_capacity;                                                                      \
+        if ((new_count) > (vec)->capacity) {                                                                            \
+            size_t _new_capacity = (vec)->capacity;                                                                     \
+            if ((vec)->capacity == 0) {                                                                                 \
+                _new_capacity = vec_init_capacity;                                                                      \
             }                                                                                                          \
             while (_new_capacity < (new_count)) {                                                                      \
                 _new_capacity *= 2;                                                                                    \
             }                                                                                                          \
-            void *_new_items = realloc((void *)(da)->items, _new_capacity * sizeof(*(da)->items));                     \
+            void *_new_items = realloc((void *)(vec)->items, _new_capacity * sizeof(*(vec)->items));                     \
             if (_new_items == NULL) {                                                                                  \
-                assert(_new_items != NULL && "Error during DA realloc");                                               \
+                assert(_new_items != NULL && "Error during vector realloc");                                               \
             }                                                                                                          \
-            (da)->capacity = _new_capacity;                                                                            \
-            (da)->items = (typeof((da)->items))_new_items;                                                             \
+            (vec)->capacity = _new_capacity;                                                                            \
+            (vec)->items = (typeof((vec)->items))_new_items;                                                             \
         }                                                                                                              \
-        (da)->count = new_count;                                                                                       \
+        (vec)->count = new_count;                                                                                       \
     } while (false);
 
-#define daAppend(da, item)                                                                                             \
+#define vecAppend(vec, item)                                                                                             \
     do {                                                                                                               \
-        daResize((da), (da)->count + 1);                                                                               \
-        (da)->items[(da)->count - 1] = (item);                                                                         \
+        vecResize((vec), (vec)->count + 1);                                                                               \
+        (vec)->items[(vec)->count - 1] = (item);                                                                         \
     } while (false);
 
-#define daRemoveAt(da, index)                                                                                          \
+#define vecRemoveAt(vec, index)                                                                                          \
     do {                                                                                                               \
-        if ((da)->count <= 0 || (da)->count <= (index)) {                                                              \
-            log("Index %zu is out of bounds(da->count=%zu)\n", index, (da)->count);                                    \
+        if ((vec)->count <= 0 || (vec)->count <= (index)) {                                                              \
+            LOG("Index %zu is out of bounds(vec->count=%zu)\n", index, (vec)->count);                                    \
             break;                                                                                                     \
         }                                                                                                              \
-        for (size_t _i = index; _i < (da)->count - 1; _i++) {                                                          \
-            (da)->items[_i] = (da)->items[_i + 1];                                                                     \
+        for (size_t _i = index; _i < (vec)->count - 1; _i++) {                                                          \
+            (vec)->items[_i] = (vec)->items[_i + 1];                                                                     \
         }                                                                                                              \
-        daResize((da), (da)->count - 1);                                                                               \
+        vecResize((vec), (vec)->count - 1);                                                                               \
     } while (false);
 
-#define daFree(da)                                                                                                     \
+#define vecFree(vec)                                                                                                     \
     do {                                                                                                               \
-        if ((da)->capacity > 0) {                                                                                      \
-            free((void *)(da)->items);                                                                                 \
-            (da)->count = 0;                                                                                           \
-            (da)->capacity = 0;                                                                                        \
+        if ((vec)->capacity > 0) {                                                                                      \
+            free((void *)(vec)->items);                                                                              \
+            (vec)->count = 0;                                                                                           \
+            (vec)->items = NULL;                                                                                           \
+            (vec)->capacity = 0;                                                                                        \
         }                                                                                                              \
     } while (false)
 
