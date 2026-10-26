@@ -601,12 +601,12 @@ int main(int argc, char *argv[]) {
                         continue;
                     }
 
-                    if (strncmp(line_buf, "exit", line_len) == 0) {
+                    if (strcmp(line_buf, "exit") == 0) {
                         printf("exiting mshell ;_; T_T\n");
                         exit(EXIT_SUCCESS);
                         return 0;
                     }
-                    if (strncmp(line_buf, "fg", line_len) == 0) {
+                    if (strcmp(line_buf, "fg") == 0) {
                         if (bg_jobs.count > 0) {
                             fg_job = bg_jobs.items[bg_jobs.count - 1];
                             printJob(&fg_job);
@@ -633,7 +633,7 @@ int main(int argc, char *argv[]) {
                         line_ended = false;
                         continue;
                     }
-                    if (strncmp(line_buf, "bg", line_len) == 0) {
+                    if (strcmp(line_buf, "bg") == 0) {
                         if (bg_jobs.count > 0) {
                             Job *last_bg_job = &bg_jobs.items[bg_jobs.count - 1];
 
@@ -654,7 +654,7 @@ int main(int argc, char *argv[]) {
                         line_ended = false;
                         continue;
                     }
-                    if (strncmp(line_buf, "cd", line_len) == 0) {
+                    if (strcmp(line_buf, "cd") == 0) {
                         line_len = 0;
                         line_ended = false;
                         continue;
