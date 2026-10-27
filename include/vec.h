@@ -1,5 +1,7 @@
 #pragma once
 #include <stddef.h>
+#include <assert.h>
+
 
 static const size_t vec_init_capacity = 8;
 #define vecResize(vec, new_count)                                                                                        \

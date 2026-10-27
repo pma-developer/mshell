@@ -1,7 +1,3 @@
-//
-// Created by pmapma on 10/27/26.
-//
-
 #include <signal.h>
 #include <stdbool.h>
 #include <stdio.h>
