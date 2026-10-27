@@ -12,6 +12,8 @@ typedef enum PipeFdType {
     PIPE_WRITE = 1,
 } PipeFdType;
 
+void parsePipeline(char *line_buf, StrArrayVec *out);
+void freePipeline(StrArrayVec *pipeline);
 Process execCommand(const StrVec *command, pid_t pgid, bool set_pg_to_fg, int epoll_fd, int stdin_fd, int stdout_fd,
     int *fds_to_close, size_t fds_count);
 Job pipeCommands(const StrArrayVec *commandsDa, int epoll_fd);

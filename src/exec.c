@@ -6,6 +6,39 @@
 #include <string.h>
 #include <sys/epoll.h>
 
+void parsePipeline(char *line_buf, StrArrayVec *out) {
+    const char pipe_delim[] = "|";
+    const char args_delim[] = " ";
+    char *pipe_strtok_saveptr = NULL;
+
+    char *pipe_token = strtok_r(line_buf, pipe_delim, &pipe_strtok_saveptr);
+
+    while (pipe_token != NULL) {
+        StrVec args = {0};
+        char *args_strtok_saveptr = NULL;
+
+        char *arg_token = strtok_r(pipe_token, args_delim, &args_strtok_saveptr);
+
+        while (arg_token != NULL) {
+            vecAppend(&args, arg_token);
+            arg_token = strtok_r(NULL, args_delim, &args_strtok_saveptr);
+        }
+
+        /* 'exec()' requires null-terminated array */
+        vecAppend(&args, NULL);
+        vecAppend(out, args);
+
+        pipe_token = strtok_r(NULL, pipe_delim, &pipe_strtok_saveptr);
+    }
+}
+
+void freePipeline(StrArrayVec *pipeline) {
+    for (int i = 0; i < pipeline->count; ++i) {
+        vecFree(&pipeline->items[i]);
+    }
+    vecFree(pipeline);
+}
+
 /* TODO: make PipeParams struct; replace last 4 arguments with 'const PipeParams *pipe_params' */
 Process execCommand(const StrVec *command, pid_t pgid, bool set_pg_to_fg, int epoll_fd, int stdin_fd, int stdout_fd, int *fds_to_close,
                     size_t fds_count) {

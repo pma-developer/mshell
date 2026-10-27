@@ -310,27 +310,7 @@ int main(int argc, char *argv[]) {
                     }
 
                     StrArrayVec command_pipe_sequence = {0};
-
-                    const char pipe_delim[] = "|";
-                    const char args_delim[] = " ";
-                    char *pipe_strtok_saveptr = NULL;
-                    char *args_strtok_saveptr = NULL;
-
-                    char *pipe_token = strtok_r(line_buf, pipe_delim, &pipe_strtok_saveptr);
-                    while (pipe_token != NULL) {
-
-                        StrVec args = {0};
-                        char *arg_token = strtok_r(pipe_token, args_delim, &args_strtok_saveptr);
-                        while (arg_token != NULL) {
-                            vecAppend(&args, arg_token);
-                            arg_token = strtok_r(NULL, args_delim, &args_strtok_saveptr);
-                        }
-                        /* 'exec()' requires null-terminated array */
-                        vecAppend(&args, NULL);
-
-                        vecAppend(&command_pipe_sequence, args);
-                        pipe_token = strtok_r(NULL, pipe_delim, &pipe_strtok_saveptr);
-                    }
+                    parsePipeline(line_buf, &command_pipe_sequence);
 
                     if (command_pipe_sequence.count == 0) {
                         printPrompt();
@@ -348,10 +328,7 @@ int main(int argc, char *argv[]) {
                         // vecAppend(&fg_job.pipeline, new_proc);
                     }
 
-                    for (int i = 0; i < command_pipe_sequence.count; ++i) {
-                        vecFree(&command_pipe_sequence.items[i]);
-                    }
-                    vecFree(&command_pipe_sequence);
+                    freePipeline(&command_pipe_sequence);
                     line_len = 0;
                     line_ended = false;
                 }
