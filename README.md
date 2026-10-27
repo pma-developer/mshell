@@ -34,7 +34,6 @@ The shell uses an event-driven architecture with:
 - **epoll**: For monitoring stdin and signal file descriptors
 - **signalfd**: For receiving SIGCHLD notifications asynchronously
 - **termios**: For terminal mode management
-- **Custom Dynamic Arrays**: Generic DA macros for resizable containers
 
 ## Built-in Commands
 
@@ -59,15 +58,8 @@ The project uses modern C tooling:
 ## Limitations
 
 - Fixed input buffer size (1024 bytes)
+- Arrow key inputs not supported
 - No command history
 - No tab completion
 - No environment variable expansion
 - `cd` command is not implemented
-
-## Future Improvements
-
-- Modularize code into separate files (job.c, parser.c, executor.c, terminal.c)
-- Remove global state
-- Add command history
-- Add tab completion
-- Add environment variable support
