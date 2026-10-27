@@ -1,8 +1,18 @@
 #include "util.h"
+
+#include "vec.h"
+
 #include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+void freeStrArrayVec(StrArrayVec *vec) {
+    for (int i = 0; i < vec->count; ++i) {
+        vecFree(&vec->items[i]);
+    }
+    vecFree(vec);
+}
 
 char *cloneStr(const char *src) {
     size_t len = strlen(src) + 1;

@@ -32,12 +32,6 @@ void parsePipeline(char *line_buf, StrArrayVec *out) {
     }
 }
 
-void freePipeline(StrArrayVec *pipeline) {
-    for (int i = 0; i < pipeline->count; ++i) {
-        vecFree(&pipeline->items[i]);
-    }
-    vecFree(pipeline);
-}
 
 /* TODO: make PipeParams struct; replace last 4 arguments with 'const PipeParams *pipe_params' */
 Process execCommand(const StrVec *command, pid_t pgid, bool set_pg_to_fg, int epoll_fd, int stdin_fd, int stdout_fd, int *fds_to_close,

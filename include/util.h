@@ -36,6 +36,7 @@ typedef struct {
     size_t capacity;
 } StrArrayVec;
 
+void freeStrArrayVec(StrArrayVec *vec);
 bool intToStr(char *buf, int n, int base);
 void reverseStr(char *cstr, size_t strLength);
 size_t removeChar(char toRemove, char *cstr, size_t strLength);

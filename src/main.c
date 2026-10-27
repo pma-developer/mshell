@@ -94,12 +94,10 @@ int main(int argc, char *argv[]) {
     printPrompt();
     while (true) {
 
-        LOG("starting epoll wait\n");
         const int ready_fds = epoll_wait(epoll_fd, event_buf, MAX_EPOLL_EVENTS, -1);
         if (ready_fds == -1) {
             perror("epoll wait");
         }
-        LOG("epoll ready_fds: %i\n", ready_fds);
 
         for (size_t fd_i = 0; fd_i < ready_fds; ++fd_i) {
             if (event_buf[fd_i].data.fd == sig_chld_fd) {
@@ -107,6 +105,7 @@ int main(int argc, char *argv[]) {
                 ssize_t read_count = 0;
                 LOG("SIGCHLD is available for read;\n");
 
+                /* check for any changes in the status of child processes */
                 while ((read_count = read(sig_chld_fd, &sig_chld_info, sizeof(sig_chld_info)))) {
                     LOG("reading sig_chld_fd\n");
                     if (read_count < 0) {
@@ -195,41 +194,7 @@ int main(int argc, char *argv[]) {
                     line_len += read_count;
                     char last_char = line_buf[line_len - 1];
 
-                    if ((unsigned char)last_char == shell_termios.c_cc[VINTR]) {
-                        printf("received VINTR\n");
-                    } else if ((unsigned char)last_char == shell_termios.c_cc[VQUIT]) {
-                        printf("received VQUIT\n");
-                    } else if ((unsigned char)last_char == shell_termios.c_cc[VERASE]) {
-                        printf("received VERASE\n");
-                    } else if ((unsigned char)last_char == shell_termios.c_cc[VKILL]) {
-                        printf("received VKILL\n");
-                    } else if ((unsigned char)last_char == shell_termios.c_cc[VEOF]) {
-                        printf("received VEOF\n");
-                    } else if ((unsigned char)last_char == shell_termios.c_cc[VTIME]) {
-                        printf("received VTIME\n");
-                    } else if ((unsigned char)last_char == shell_termios.c_cc[VMIN]) {
-                        printf("received VMIN\n");
-                    } else if ((unsigned char)last_char == shell_termios.c_cc[VSWTC]) {
-                        printf("received VSWTC\n");
-                    } else if ((unsigned char)last_char == shell_termios.c_cc[VSTART]) {
-                        printf("received VSTART\n");
-                    } else if ((unsigned char)last_char == shell_termios.c_cc[VSTOP]) {
-                        printf("received VSTOP\n");
-                    } else if ((unsigned char)last_char == shell_termios.c_cc[VSUSP]) {
-                        printf("received VSUSP\n");
-                    } else if ((unsigned char)last_char == shell_termios.c_cc[VEOL]) {
-                        printf("received VEOL\n");
-                    } else if ((unsigned char)last_char == shell_termios.c_cc[VREPRINT]) {
-                        printf("received VREPRINT\n");
-                    } else if ((unsigned char)last_char == shell_termios.c_cc[VDISCARD]) {
-                        printf("received VDISCARD\n");
-                    } else if ((unsigned char)last_char == shell_termios.c_cc[VWERASE]) {
-                        printf("received VWERASE\n");
-                    } else if ((unsigned char)last_char == shell_termios.c_cc[VLNEXT]) {
-                        printf("received VLNEXT\n");
-                    } else if ((unsigned char)last_char == shell_termios.c_cc[VEOL2]) {
-                        printf("received VEOL2\n");
-                    } else if (last_char == '\n') {
+                    if (last_char == '\n') {
                         line_ended = true;
                     }
                 }
@@ -328,7 +293,7 @@ int main(int argc, char *argv[]) {
                         // vecAppend(&fg_job.pipeline, new_proc);
                     }
 
-                    freePipeline(&command_pipe_sequence);
+                    freeStrArrayVec(&command_pipe_sequence);
                     line_len = 0;
                     line_ended = false;
                 }
