@@ -1,12 +1,11 @@
-#define ENABLE_LOGS 1
+//#define ENABLE_LOGS
 #include "utilsc.h"
+#include "vec.h"
+#include "terminal.h"
 #include <bits/types/sigset_t.h>
 #include <errno.h>
 #include <fcntl.h>
-#include <limits.h>
-#include <pwd.h>
 #include <signal.h>
-#include <stdatomic.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdio.h>
@@ -51,7 +50,6 @@ typedef struct {
 } StrArrayVec;
 
 struct GlobalState {
-    struct termios prev_termios;
 };
 
 typedef struct {
@@ -79,8 +77,6 @@ int epoll_fd;
 #define MAX_EPOLL_EVENTS 10
 #define MAX_PROMPT_SUB_STR_SIZE 128
 #define PROMPT_SIZE ((MAX_PROMPT_SUB_STR_SIZE * 3) + 50)
-
-void resetTermios() { tcsetattr(STDIN_FILENO, TCSAFLUSH, &glb.prev_termios); }
 
 void freeProcessFields(const Process *process) {
     LOG("freeing process->name %p\n", process->name);
@@ -134,16 +130,6 @@ void printWStatusDesc(int wstatus, const char *procname, pid_t pid) {
     if (WIFCONTINUED(wstatus)) {
         printf("\n%s(%i) continued\n", procname, pid);
     }
-}
-
-void ignoreStopSignals(bool ignore) {
-    __sighandler_t handler = ignore ? SIG_IGN : SIG_DFL;
-
-    signal(SIGINT, handler);
-    signal(SIGQUIT, handler);
-    signal(SIGTSTP, handler);
-    signal(SIGTTIN, handler);
-    signal(SIGTTOU, handler);
 }
 
 ProcStatus waitProcStatus(pid_t pid) {
@@ -205,9 +191,8 @@ Process execCommand(const StrVec *command, pid_t pgid, bool set_pg_to_fg, int st
         }
 
         /* Reseting termios */
-        resetTermios();
-
-        ignoreStopSignals(false);
+        terminalResetOriginal();
+        terminalIgnoreStopSignals(false);
 
         if (setpgid_res != 0) {
             perror("setpgid");
@@ -399,14 +384,11 @@ int main(int argc, char *argv[]) {
     const size_t max_line_len = 1024;
     struct termios shell_termios;
 
-    tcgetattr(STDIN_FILENO, &glb.prev_termios);
-    atexit(resetTermios);
-
-    shell_termios = glb.prev_termios;
-    shell_termios.c_lflag &= ~(ISIG | TOSTOP);
-
-    ignoreStopSignals(true);
-    tcsetattr(STDIN_FILENO, TCSAFLUSH, &shell_termios);
+    if (!terminalInit(&shell_termios)) {
+        return EXIT_FAILURE;
+    }
+    atexit(terminalResetOriginal);
+    terminalIgnoreStopSignals(true);
 
     char line_buf[max_line_len + 1];
     size_t line_len = 0;
@@ -515,7 +497,7 @@ int main(int argc, char *argv[]) {
                         }
                         fg_job = (Job){0};
                         /* return control to the shell */
-                        LOG("returning controll to the shell\n");
+                        LOG("returning control to the shell\n");
                         if (tcsetpgrp(STDIN_FILENO, getpgid(0)) != 0) {
                             perror("tcsetpgrp(STDIN_FILENO, getpgid(0));");
                         }
